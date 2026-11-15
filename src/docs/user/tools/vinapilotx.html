@@ -1,0 +1,28 @@
+<html><head><meta charset="utf-8"><title>Lattice VinaPilotX</title></head><body>
+<h2>Lattice VinaPilotX</h2>
+<p>Dock ligands with AutoDock Vina from ChimeraX. Open it from <b>Tools &rarr; Binding Analysis &rarr; Lattice VinaPilotX</b> or with <code>vinax gui</code>.</p>
+<ol>
+<li><b>Settings</b> &ndash; browse to <code>vina</code>/<code>vina.exe</code> (or its folder) or press <i>Download latest Vina</i>; choose the working directory; switch the native <code>.pdbqt</code> opening override on/off.</li>
+<li><b>Inputs</b> &ndash; the receptor opens in the scene when you select it (other models are hidden); ligands appear in a table with heavy atoms, torsions, dimensions (principal-axis extents), longest distance, charge, acceptors/polar H, folder and file. The largest ligand is highlighted to help size the box.</li>
+<li><b>Box</b> &ndash; type center/size, build it from the selection, or drag it with the mouse.</li>
+<li><b>Run</b> &ndash; set exhaustiveness etc. and press <i>Run docking</i>. Interrupted batches resume; finished ligands are not re-docked unless you tick the re-dock option.</li>
+<li><b>Results</b> &ndash; sortable table; double-click to open poses (ViewDock). Export to CSV.</li>
+</ol>
+<h3>Working-directory layout</h3>
+<pre>receptor/  ligands/  results/  logs/  vina_config.txt  summary.csv  manifest.json</pre>
+<h3>Commands</h3>
+<pre>vinax gui [settings|inputs|box|run|results]
+vinax vina [path FILE] [download true]
+vinax box center x,y,z size x,y,z
+vinax box selection true padding 4 [method bounds|centroid]
+vinax run receptor.pdbqt ligands C:/ligs   (a file, a folder, a library file, or a wildcard such as C:/ligs/*.pdbqt)
+      workdir C:/docking/p1 \
+      [center x,y,z size x,y,z] [exhaustiveness 8] [num_modes 9] [energy_range 3] [cpu 0] \
+      [parallel 1] [seed 0] [scoring vina|vinardo] [overwrite true] [recursive true]
+vinax cancel
+vinax pdbqt [native true|false]</pre>
+<p><b>Seeds:</b> with the default (random) Vina picks its own seed for each ligand; Lattice VinaPilotX reads the seed Vina reports and records it in the Results table, <code>summary.csv</code>, <code>manifest.json</code> and the log. Enter a number to force the same seed for every ligand.</p>
+<p><b>Parallel jobs</b> means separate ligands docked side by side, not several ligands docked into the site together.</p>
+<p>Without <code>center</code>/<code>size</code>, <code>dock</code> uses the box in the scene.</p>
+<p>Receptor and ligands must already be prepared PDBQT files (for example by Meeko or AutoDockTools). Full details: see DETAILS.md in the project repository.</p>
+</body></html>

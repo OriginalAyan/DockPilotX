@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- VinaPilotX source bundle. Build with ChimeraX's "devel build" command. -->
+<BundleInfo name="ChimeraX-VinaPilotX" version="0.3.1" package="chimerax.vinapilotx"
+            minSessionVersion="1" maxSessionVersion="1" customInit="true">
+  <Author>Ayan Bhowmik</Author>
+  <Email>ayan.bhowmik.bd@gmail.com</Email>
+  <URL>https://github.com/OriginalAyan/VinaGridBox</URL>
+  <Synopsis>Dock ligands with AutoDock Vina from ChimeraX: search box, single and batch docking, results table.</Synopsis>
+  <Description>
+Lattice VinaPilotX runs AutoDock Vina from inside UCSF ChimeraX. Choose (or download) the Vina program, pick a prepared receptor PDBQT and one or more ligand PDBQT files, folders or multi-ligand library files, define the search box on the structure (numeric entry, from the selection, or by mouse), set exhaustiveness and other Vina options, and dock. Single ligands and large batches are supported, with parallel runs, cancel, resume of interrupted batches, per-ligand logs, a summary CSV and a reproducibility manifest. Poses open directly in ChimeraX/ViewDock. The search-box editor is derived from the ChimeraX Vina Grid Box bundle. Lattice VinaPilotX starts Vina as a separate program and does not install anything into ChimeraX's Python.
+
+Distributed under LGPL-2.1-only because it includes adapted LGPL-licensed mouse-interaction code; see LICENSE.txt and THIRD_PARTY_NOTICES.md. Coding and debugging were carried out with assistance from AI tools; the author is responsible for review, testing and release.
+  </Description>
+  <Categories>
+    <Category name="Binding Analysis"/>
+  </Categories>
+  <Dependencies>
+    <Dependency name="ChimeraX-Core" version="~=1.0"/>
+    <Dependency name="ChimeraX-UI" version="~=1.0"/>
+    <Dependency name="ChimeraX-Atomic" version="~=1.0"/>
+    <Dependency name="ChimeraX-Surface" version="~=1.0"/>
+    <Dependency name="ChimeraX-MouseModes" version="~=1.0"/>
+  </Dependencies>
+  <DataFiles>
+    <DataFile>docs/user/tools/vinapilotx.html</DataFile>
+    <DataFile>LICENSE.txt</DataFile>
+    <DataFile>THIRD_PARTY_NOTICES.md</DataFile>
+  </DataFiles>
+  <Classifiers>
+    <PythonClassifier>Development Status :: 3 - Alpha</PythonClassifier>
+    <PythonClassifier>Intended Audience :: Science/Research</PythonClassifier>
+    <PythonClassifier>License :: OSI Approved :: GNU Lesser General Public License v2.1 (LGPLv2.1)</PythonClassifier>
+    <PythonClassifier>Natural Language :: English</PythonClassifier>
+    <PythonClassifier>Programming Language :: Python :: 3</PythonClassifier>
+    <PythonClassifier>Programming Language :: Python :: 3.11</PythonClassifier>
+    <PythonClassifier>Topic :: Scientific/Engineering :: Chemistry</PythonClassifier>
+    <ChimeraXClassifier>ChimeraX :: Tool :: Lattice VinaPilotX :: Binding Analysis :: Dock ligands with AutoDock Vina: setup, search box, run, results</ChimeraXClassifier>
+    <ChimeraXClassifier>ChimeraX :: Command :: vinax gui :: Binding Analysis :: Open the Lattice VinaPilotX window</ChimeraXClassifier>
+    <ChimeraXClassifier>ChimeraX :: Command :: vinax vina :: Binding Analysis :: Set, verify or download the AutoDock Vina program</ChimeraXClassifier>
+    <ChimeraXClassifier>ChimeraX :: Command :: vinax box :: Binding Analysis :: Create or update the search box</ChimeraXClassifier>
+    <ChimeraXClassifier>ChimeraX :: Command :: vinax run :: Binding Analysis :: Dock one or many ligands with AutoDock Vina</ChimeraXClassifier>
+    <ChimeraXClassifier>ChimeraX :: Command :: vinax cancel :: Binding Analysis :: Cancel the running docking job</ChimeraXClassifier>
+    <ChimeraXClassifier>ChimeraX :: Command :: vinax pdbqt :: Binding Analysis :: Switch the native .pdbqt reader override on or off</ChimeraXClassifier>
+  </Classifiers>
+</BundleInfo>
