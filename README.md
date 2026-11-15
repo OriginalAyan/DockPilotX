@@ -17,8 +17,5 @@ python -m pytest -q tests               # core logic, uses a fake Vina
 python tests/gui_smoke.py               # offscreen GUI run with stub ChimeraX (needs PySide6-Essentials)
 ```
 
-## Renaming
-`python rename_bundle.py NewName "New Display Name" [command_prefix]`
-
 ## Licence
 LGPL-2.1-only (derived from VinaGridBox v2.0.0, which adapts LGPL code from ChimeraX-Vinardock). See `LICENSE.txt` and `THIRD_PARTY_NOTICES.md`.
