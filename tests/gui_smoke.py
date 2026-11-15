@@ -19,6 +19,7 @@ class Model:
     def child_models(self): return list(self._kids)
     def delete(self):
         self.deleted = True
+        for k in self._kids: k.deleted = True
         if getattr(self.session, 'models', None) and self in self.session.models.items: self.session.models.items.remove(self)
 class Surface(Model):
     def set_geometry(self, *a): pass
@@ -29,17 +30,60 @@ class UndoAction:
 mod("chimerax.core.undo", UndoAction=UndoAction)
 ran = []
 _ids = [10]
-class _Atoms:
-    def __init__(self): self.scene_coords = np.array([[0, 0, 0], [30, 10, 5.0]]); self.__len = 2
-    def __len__(self): return 2
+class Residue:
+    def __init__(self, name, number): self.name, self.number, self.chain_id, self.atoms = name, number, "A", []
+class Atom:
+    def __init__(self, st, name, res, shown=True): self.structure, self.name, self.residue, self.display = st, name, res, shown
+class _Atoms(list):
+    scene_coords = np.array([[0, 0, 0], [30, 10, 5.0]])
+class PseudobondGroup(Model):
+    pass
+class PB:
+    def __init__(self, a, b): self.atoms, self.length, self.display, self.deleted, self.color, self.radius = (a, b), 3.0, True, False, None, None
+    def delete(self): self.deleted = True
+class PBGroup(PseudobondGroup):
+    def __init__(self, name, sess):
+        super().__init__(name, sess); self.pseudobonds = []; self.dashes = 0
+    @property
+    def num_pseudobonds(self): return len([p for p in self.pseudobonds if not p.deleted])
+    def new_pseudobond(self, a, b):
+        p = PB(a, b); self.pseudobonds.append(p); return p
+def _mk_structure(sess, name, natoms, shown=None):
+    m = Model(name, sess); res = []
+    m.atoms = _Atoms()
+    for i in range(natoms):
+        if i % 2 == 0: res.append(Residue("RES", len(res) + 1))
+        a = Atom(m, "A%d" % i, res[-1], True if shown is None else shown(i)); res[-1].atoms.append(a); m.atoms.append(a)
+    return m
+_ids = [10]
+def _by_spec(sess, spec):
+    ids = tuple(int(x) for x in spec.lstrip("#").split("."))
+    for m in sess.models.items:
+        if m.id == ids: return m
+        for k in m.child_models():
+            if k.id == ids: return k
 def _run(sess, text):
     ran.append(text)
     if text.startswith("open ") and "format pdbqt" in text:
-        m = Model(text, sess); m.atoms = _Atoms(); _ids[0] += 1; m.id = (_ids[0],); sess.models.items.append(m)
+        _ids[0] += 1
+        if "_out.pdbqt" in text:
+            m = Model("out", sess); m.id = (_ids[0],); m.atoms = _Atoms()
+            for k in range(1, 4):
+                c = _mk_structure(sess, "pose%d" % k, 4); c.id = (_ids[0], k); m.add([c])
+        else:
+            m = _mk_structure(sess, text, 4, shown=lambda i: i < 2); m.id = (_ids[0],)
+        sess.models.items.append(m)
     elif text.startswith(("hbonds", "clashes")):
         nm = text.split(" name ")[1].split()[0]
-        g = PseudobondGroup(nm, sess); g.name = nm; _ids[0] += 1; g.id = (_ids[0],); g.num_pseudobonds = 2 if text.startswith("hbonds") else 1
-        g.pseudobonds = []; sess.models.items.append(g)
+        specs = text.split()[1].split(",")
+        lig, rec = _by_spec(sess, specs[0]), _by_spec(sess, specs[1] if text.startswith("hbonds") else text.split("restrict ")[1].split()[0].split(",")[0])
+        g = PBGroup(nm, sess); _ids[0] += 1; g.id = (_ids[0],)
+        if text.startswith("hbonds"):
+            g.new_pseudobond(lig.atoms[0], rec.atoms[2])
+            if " relax true" in text: g.new_pseudobond(lig.atoms[1], rec.atoms[3])
+        else:
+            g.new_pseudobond(lig.atoms[1], rec.atoms[0])
+        sess.models.items.append(g)
 mod("chimerax.core.commands", run=_run, CmdDesc=object, EnumOf=lambda x: x, FloatArg=1, Float3Arg=1, IntArg=1, StringArg=1, BoolArg=1)
 class UserError(Exception): pass
 mod("chimerax.core.errors", UserError=UserError)
@@ -51,8 +95,6 @@ class MainToolWindow:
     def __init__(self, tool): self.ui_area = QtWidgets.QWidget(); self.shown = False
     def manage(self, placement=None): self.ui_area.show()
 mod("chimerax.ui", MainToolWindow=MainToolWindow)
-class PseudobondGroup(Model):
-    pass
 mod("chimerax.atomic", selected_atoms=lambda s: [], PseudobondGroup=PseudobondGroup)
 mod("chimerax.app_dirs", user_data_dir=tempfile.mkdtemp())
 sys.modules["chimerax"].app_dirs = sys.modules["chimerax.app_dirs"]
@@ -92,6 +134,12 @@ class Undo:
 class Session:
     pass
 session = Session(); session.logger = Log(); session.ui = UI(); session.models = Models(); session.undo = Undo()
+class PBMgr:
+    def get_group(self, name):
+        for m in session.models.items:
+            if isinstance(m, PBGroup) and m.name == name and not m.deleted: return m
+        g = PBGroup(name, session); _ids[0] += 1; g.id = (_ids[0],); session.models.items.append(g); return g
+session.pb_manager = PBMgr()
 session.triggers = types.SimpleNamespace(add_handler=lambda *a: 1, remove_handler=lambda h: None)
 
 class Formats:
@@ -189,37 +237,73 @@ W = os.path.join(tmp, "work")
 rows_ = list(__import__("csv").DictReader(open(os.path.join(W, "summary.csv"))))
 assert len(rows_) >= 3 and {"pose", "rmsd_lb", "rmsd_ub", "rating"} <= set(rows_[0]) and "time" not in "".join(rows_[0]).lower()
 assert os.path.isfile(os.path.join(W, "run_log.txt"))
-# expand: all poses listed, receptor never reopened
+# expand: all poses listed
 R = tool.results
 top = T.topLevelItem(0); top.setExpanded(True)
 assert top.childCount() == top.job.n_poses and top.childCount() > 1
-n_rec_open = sum("rec" in c and c.startswith("open ") for c in ran)
-# select pose 1, then each pose: cache capped at 5, receptor opened only by the tool (not again)
-R.viewer.max_open = 3
-for i in range(top.childCount()):
+rec_model = tool._receptor_models[0]
+def n_open(pred): return sum(pred(c) for c in ran if c.startswith("open "))
+n_rec = n_open(lambda c: "_out.pdbqt" not in c)
+# select poses of one ligand: the whole file opens ONCE and poses are sub-models
+T.clearSelection(); top.child(0).setSelected(True); R._apply_selection()
+name0 = top.job.name
+assert n_open(lambda c: name0 + "_out.pdbqt" in c) == 1
+ent = R.viewer._entries[name0]; assert len(ent.poses) == 3
+assert [m.display for m in ent.poses] == [True, False, False]
+for i in (1, 2, 0):
     T.clearSelection(); top.child(i).setSelected(True); R._apply_selection()
-open_poses = [e for e in R.viewer._entries.values() if not e.model.deleted]
-assert len(open_poses) <= 3, len(open_poses)
-assert sum("rec" in c and c.startswith("open ") for c in ran) == n_rec_open, "receptor was reopened"
+    assert [m.display for m in ent.poses] == [k == i for k in range(3)]
+assert n_open(lambda c: name0 + "_out.pdbqt" in c) == 1, "same ligand file must not be reopened"
+assert n_open(lambda c: "_out.pdbqt" not in c) == n_rec, "receptor was reopened"
+# cap of open ligand files (3 ligands, cap 2): the oldest is closed
+R.viewer.max_open = 2
+for r in range(3):
+    it = T.topLevelItem(r); it.setExpanded(True); T.clearSelection(); it.child(0).setSelected(True); R._apply_selection()
+live = [e for e in R.viewer._entries.values() if not e.parent.deleted]
+assert len(live) == 2, len(live)
+R.viewer.max_open = 5
 # rating persists
 child = top.child(1); combo = T.itemWidget(child, 4); combo.setCurrentIndex(5)
 assert R.store.get(top.job.name, 2)["rating"] == 5
-# H-bonds / clashes for the selected pose
-T.clearSelection(); child.setSelected(True); R.analyze("hbonds"); R.analyze("clashes")
-assert child.text(5) == "2" and child.text(6) == "1", (child.text(5), child.text(6))
+# H-bonds / clashes: counts, relaxed split, only two shared bond models, receptor residue revealed then retracted
+T.clearSelection(); child.setSelected(True); R._apply_selection()
+assert rec_model.atoms[2].display is False
+R.analyze("hbonds"); R.analyze("clashes")
+assert child.text(5) == "1 (+1)" and child.text(6) == "1", (child.text(5), child.text(6))
+groups = [m for m in session.models.list() if m.__class__.__name__ == "PBGroup"]
+assert sorted(g.name for g in groups) == ["Lattice H-bonds", "Lattice clashes"], [g.name for g in groups]
+assert rec_model.atoms[2].display is True and rec_model.atoms[3].display is True      # revealed
+cols = {tuple(p.color) for g in groups for p in g.pseudobonds if not p.deleted}
+assert cols == {(0, 191, 255, 255), (47, 111, 214, 255), (255, 106, 0, 255)}, cols
+ent = R.viewer._entries[name0]
+# switch to another pose: its revealed residues retract, bonds hidden
+T.clearSelection(); top.child(2).setSelected(True); R._apply_selection()
+assert rec_model.atoms[2].display is False and rec_model.atoms[3].display is False
+assert all(pb.display is False for pb, _ in ent.bonds[2])
+# back: bonds and residues return
+T.clearSelection(); child.setSelected(True); R._apply_selection()
+assert rec_model.atoms[2].display is True and all(pb.display for pb, _ in ent.bonds[2])
+# colour change applies to drawn bonds
+R.viewer.set_colors({"hbond": "#ff0000"})
+assert any(tuple(p.color) == (255, 0, 0, 255) for p in groups[0].pseudobonds if not p.deleted) or any(tuple(p.color) == (255, 0, 0, 255) for p in groups[1].pseudobonds if not p.deleted)
+tool._colors["hbond"] = "#00bfff"; tool._apply_colors()
 assert os.path.isfile(os.path.join(W, "analysis.json"))
-# reload the folder in a fresh results tab state: rating + analysis restored
+assert os.path.isfile(os.path.join(W, "pose_cache", name0 + "_pose2_interactions.json"))
+# evict the ligand and show it again: bonds are redrawn from the saved file, no recalculation
+n_calc = sum(c.startswith(("hbonds", "clashes")) for c in ran)
+R.viewer._evict(name0)
+T.clearSelection(); child.setSelected(True); R._apply_selection()
+ent = R.viewer._entries[name0]
+assert len(ent.bonds[2]) == 3 and sum(c.startswith(("hbonds", "clashes")) for c in ran) == n_calc
+assert rec_model.atoms[2].display is True
+# reload the folder: rating + analysis restored
 assert R.load_workdir(W)
-top2 = T.topLevelItem(0)
-for r in range(T.topLevelItemCount()):
-    if T.topLevelItem(r).job.name == top.job.name: top2 = T.topLevelItem(r)
+top2 = [T.topLevelItem(r) for r in range(T.topLevelItemCount()) if T.topLevelItem(r).job.name == name0][0]
 top2.setExpanded(True)
-assert top2.child(1).text(5) == "2" and T.itemWidget(top2.child(1), 4).currentIndex() == 5
+assert top2.child(1).text(5) == "1 (+1)" and T.itemWidget(top2.child(1), 4).currentIndex() == 5
 assert top2.text(4) == "★★★★★"
-# save rated poses
 R.min_rating.setValue(4); R.save_rated()
 sel = os.path.join(W, "selected_poses"); assert os.path.isdir(sel) and any(f.endswith(".pdbqt") for f in os.listdir(sel))
-# viewdock + csv export helpers do not crash
 R.tree.clearSelection()
 cfg = open(os.path.join(tmp, "work", "vina_config.txt")).read(); assert "exhaustiveness = 16" in cfg and "size_x = 22.0000" in cfg
 # reset defaults + progress bar style

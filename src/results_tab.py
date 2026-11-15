@@ -21,6 +21,13 @@ C_NAME, C_AFF, C_LB, C_UB, C_RATE, C_HB, C_CL, C_POSES, C_SEED, C_STATUS = range
 STARS = ["—", "★", "★★", "★★★", "★★★★", "★★★★★"]
 
 
+def hb_text(rec):
+    if rec.get("hbonds") is None:
+        return ""
+    n = rec.get("hbonds_relaxed") or 0
+    return "%d (+%d)" % (rec["hbonds"], n) if n else str(rec["hbonds"])
+
+
 class _Item(QTreeWidgetItem):
     """Tree item sorted numerically; poses always stay in pose order inside their ligand."""
 
@@ -55,9 +62,9 @@ class ResultsTab(QWidget):
         self.jobs = []
         self.store = None
         self.workdir = None
-        self.viewer = PoseViewer(session, host, max_open=int(controller.settings.get("max_open_poses", 5)))
+        self.viewer = PoseViewer(session, host, max_open=int(controller.settings.get("max_open_files", 5)),
+                                colors=controller.settings.get("colors"))
         self._ligand_items = {}
-        self._viewdock = {}
         self._building = False
         self._sel_timer = QTimer(self)
         self._sel_timer.setSingleShot(True)
@@ -69,11 +76,11 @@ class ResultsTab(QWidget):
     def _build_ui(self):
         lay = QVBoxLayout(self)
         top = QHBoxLayout()
-        top.addWidget(QLabel("Max poses kept open"))
+        top.addWidget(QLabel("Max ligand files kept open"))
         self.max_open_spin = QSpinBox()
         self.max_open_spin.setRange(1, 50)
         self.max_open_spin.setValue(self.viewer.max_open)
-        self.max_open_spin.setToolTip("Older poses are closed automatically beyond this number.")
+        self.max_open_spin.setToolTip("Each ligand file holds all its poses. The oldest file is closed beyond this number.")
         self.max_open_spin.valueChanged.connect(self._max_open_changed)
         top.addWidget(self.max_open_spin)
         self.receptor_cb = QCheckBox("Show receptor")
@@ -135,7 +142,7 @@ class ResultsTab(QWidget):
 
     def _max_open_changed(self, v):
         self.viewer.max_open = v
-        self.controller.settings.set("max_open_poses", v)
+        self.controller.settings.set("max_open_files", v)
 
     # ------------------------------------------------------------ populate
     def set_jobs(self, jobs, workdir, receptor_file):
@@ -202,9 +209,9 @@ class ResultsTab(QWidget):
         for n, (aff, lb, ub) in enumerate(job.poses, start=1):
             rec = self.store.get(job.name, n) if self.store else {}
             child = _Item(["Pose %d" % n, "%.3f" % aff, "%.3f" % lb, "%.3f" % ub, "",
-                           "" if rec.get("hbonds") is None else str(rec["hbonds"]),
+                           hb_text(rec),
                            "" if rec.get("clashes") is None else str(rec["clashes"])], job=job, pose=n)
-            for col, v in ((C_AFF, aff), (C_LB, lb), (C_UB, ub), (C_HB, rec.get("hbonds")), (C_CL, rec.get("clashes"))):
+            for col, v in ((C_AFF, aff), (C_LB, lb), (C_UB, ub), (C_HB, (rec.get("hbonds") or 0) + (rec.get("hbonds_relaxed") or 0) if rec.get("hbonds") is not None else None), (C_CL, rec.get("clashes"))):
                 child.sort_values[col] = v
             tips = rec.get("hbond_partners")
             if tips:
@@ -236,9 +243,9 @@ class ResultsTab(QWidget):
         wanted = self._selected_poses()
         try:
             if wanted:
-                if len(wanted) > self.viewer.max_open:
-                    self.note.setText("Showing the first %d of %d selected poses (see 'Max poses kept open')."
-                                      % (self.viewer.max_open, len(wanted)))
+                if len({j.name for j, _ in wanted}) > self.viewer.max_open:
+                    self.note.setText("Showing the first %d ligands (see 'Max ligand files kept open')."
+                                      % self.viewer.max_open)
                 else:
                     self.note.setText("Select a pose to show it. Expand a ligand to see all poses.")
                 self.viewer.show(wanted, with_receptor=self.receptor_cb.isChecked())
@@ -273,17 +280,17 @@ class ResultsTab(QWidget):
                 self.note.setText("Calculating %s for %s pose %d …" % (label, job.name, pose))
                 QGuiApplication.processEvents()
                 try:
-                    count, partners = self.viewer.analyze(job, pose, kind)
+                    count, relaxed, partners = self.viewer.analyze(job, pose, kind)
                 except Exception as err:
                     self.note.setText("%s failed: %s" % (label, err))
                     self.session.logger.warning("%s calculation failed: %s" % (label, err))
                     return
                 if kind == "hbonds":
-                    self.store.set(job.name, pose, hbonds=count, hbond_partners=partners)
+                    self.store.set(job.name, pose, hbonds=count, hbonds_relaxed=relaxed, hbond_partners=partners)
                 else:
                     self.store.set(job.name, pose, clashes=count)
                 self._refresh_pose_row(job, pose)
-            self.note.setText("Done. The %s are shown in the scene; they follow the selected pose." % label)
+            self.note.setText("Done. The %s are saved and shown whenever the pose is shown." % label)
         finally:
             QGuiApplication.restoreOverrideCursor()
 
@@ -295,9 +302,10 @@ class ResultsTab(QWidget):
             ch = item.child(i)
             if ch.pose == pose:
                 rec = self.store.get(job.name, pose)
-                ch.setText(C_HB, "" if rec.get("hbonds") is None else str(rec["hbonds"]))
+                ch.setText(C_HB, hb_text(rec))
                 ch.setText(C_CL, "" if rec.get("clashes") is None else str(rec["clashes"]))
-                ch.sort_values[C_HB], ch.sort_values[C_CL] = rec.get("hbonds"), rec.get("clashes")
+                ch.sort_values[C_HB] = None if rec.get("hbonds") is None else rec["hbonds"] + (rec.get("hbonds_relaxed") or 0)
+                ch.sort_values[C_CL] = rec.get("clashes")
                 if rec.get("hbond_partners"):
                     ch.setToolTip(C_HB, "\n".join(rec["hbond_partners"]))
 
@@ -310,12 +318,10 @@ class ResultsTab(QWidget):
             if job is None or not job.poses or job.name in done or not os.path.isfile(job.out_path):
                 continue
             done.add(job.name)
-            if job.name in self._viewdock and any(not getattr(m, "deleted", False) for m in self._viewdock[job.name]):
-                self.note.setText("%s is already open." % job.name)
-                continue
-            before = {m for m in self.session.models.list() if len(m.id) == 1}
-            run(self.session, 'open "%s" format pdbqt' % os.path.abspath(job.out_path).replace("\\", "/"))
-            self._viewdock[job.name] = [m for m in self.session.models.list() if len(m.id) == 1 and m not in before]
+            try:
+                run(self.session, "viewdock %s" % self.viewer.ligand_spec(job))
+            except Exception as err:
+                self.note.setText("ViewDock failed: %s" % err)
 
     # --------------------------------------------------------------- export
     def export_csv(self):

@@ -58,3 +58,44 @@ class AnalysisStore:
                 if int(rec.get("rating", 0) or 0) >= minimum:
                     out.append((lig, int(n), rec))
         return out
+
+
+class InteractionCache:
+    """Saved H-bond / clash atom pairs per pose: <workdir>/pose_cache/<ligand>_pose<N>_interactions.json
+
+    Atoms are stored as indexes into the pose's atom list and the receptor's atom list, so the bonds can
+    be redrawn later without recalculating. Layout::
+
+        {"version": 1, "n_ligand_atoms": int, "n_receptor_atoms": int,
+         "hbonds":  [[ligand_atom, receptor_atom, relaxed(0/1), distance], ...],
+         "clashes": [[ligand_atom, receptor_atom, distance], ...]}
+    """
+
+    def __init__(self, workdir):
+        self.dir = os.path.join(workdir, "pose_cache")
+
+    def path(self, ligand, pose):
+        return os.path.join(self.dir, "%s_pose%d_interactions.json" % (ligand, pose))
+
+    def load(self, ligand, pose):
+        try:
+            with open(self.path(ligand, pose), "r", encoding="utf-8") as f:
+                d = json.load(f)
+            return d if isinstance(d, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def save(self, ligand, pose, **fields):
+        """Merge *fields* into the stored record and write it atomically."""
+        d = self.load(ligand, pose)
+        d["version"] = 1
+        d.update(fields)
+        try:
+            os.makedirs(self.dir, exist_ok=True)
+            p = self.path(ligand, pose)
+            with open(p + ".tmp", "w", encoding="utf-8") as f:
+                json.dump(d, f)
+            os.replace(p + ".tmp", p)
+            return True
+        except OSError:
+            return False

@@ -136,10 +136,12 @@ If a ligand already has a result and a log in the working folder, it is reused (
 ## 5. Results tab
 
 - **Expandable tree.** One row per ligand (best affinity, number of poses, seed, status, best rating). Expand it to list every pose: affinity, RMSD l.b., RMSD u.b., rating, H-bonds, clashes. Poses stay in pose order when you sort; ligand rows sort by any column.
-- **Instant display.** Selecting a pose shows it (with the receptor) and hides the previous one. Each pose is extracted from the Vina output into `pose_cache/` and opened once; at most *Max poses kept open* (default 5) stay loaded, and the least recently used is closed (with its bonds). The receptor is opened once and reused.
+- **Instant display.** A ligand's whole Vina output (all poses) is opened once as one model, so its poses appear as sub-models (e.g. #3.1, #3.2 …). Selecting a pose shows that sub-model and hides the others, so clicking through poses is instant. At most *Max ligand files kept open* (default 5) stay loaded; opening another closes the least recently used one. The receptor is opened once and reused.
 - **Rating.** A 1–5 star box per pose, stored in `analysis.json`. **Save rated poses…** copies poses at or above a chosen rating, plus a CSV and the receptor, into `selected_poses/`.
-- **H-bonds / Clashes.** Select pose(s) and click: runs ChimeraX `hbonds` / `clashes` between that pose and the receptor, puts the counts in the table (partners in the H-bond tooltip) and leaves the bonds visible. Up to 3 poses per click. Other interaction types are planned.
-- **Open in ViewDock** opens the whole output file of the selected ligand(s) (once).
+- **H-bonds / Clashes.** Select pose(s) and click (up to 3 per click). H-bonds are found twice with ChimeraX `hbonds`: with strict criteria and with relaxed criteria; bonds found only in the relaxed run are drawn in a second colour and shown as "3 (+1)" (3 strict, 1 relaxed). Clashes use `clashes`. All bonds of all poses live in just two models, "Lattice H-bonds" and "Lattice clashes", and are shown only for the displayed pose. The receptor residues revealed around a pose's bonds are hidden again when you switch away from that pose.
+- **Saved interactions.** Each pose's bonds are stored in `pose_cache/<ligand>_pose<N>_interactions.json` (atom indexes) and the counts in `analysis.json`. Showing the pose again, also after restarting ChimeraX and using *Load folder…*, redraws them without recalculating. Saved bonds are skipped if the receptor no longer matches.
+- **Colours.** Settings tab → Interaction colours: H-bonds (default #00bfff), H-bonds with relaxed criteria (default #2f6fd6) and clashes (default #ff6a00). Changes apply immediately to drawn bonds and are remembered.
+- **Open in ViewDock** runs `viewdock` on the already-open model of the selected ligand(s).
 - **Export CSV** writes every pose with rating, H-bonds, clashes and partners. **Load folder…** rebuilds the tree from a working folder, including ratings and saved H-bond/clash results, so analysis continues where you stopped.
 - The Run-tab log is saved to `run_log.txt` in the working folder.
 
@@ -154,11 +156,11 @@ results/<name>_out.pdbqt   Vina poses (REMARK VINA RESULT lines give the affinit
 logs/<name>.log            command line + Vina console output
 vina_config.txt            box and search parameters shared by all ligands
 summary.csv                one row per POSE: ligand, pose, affinity, rmsd_lb, rmsd_ub, rating,
-                           hbonds, clashes, hbond_partners, seed, status, error
+                           hbonds, hbonds_relaxed, clashes, hbond_partners, seed, status, error
 best_per_ligand.csv        one row per ligand (best affinity, poses, seed, status)
 run_log.txt                timestamped copy of the Run-tab log
 analysis.json              ratings, H-bond and clash results
-pose_cache/                single-pose files used for display (safe to delete)
+pose_cache/                saved H-bond/clash atom pairs per pose (deleting it loses only the drawing; counts stay in analysis.json)
 selected_poses/            written by "Save rated poses…"
 manifest.json              tool/Vina versions, receptor, box, parameters, seed policy and seeds,
                            an example command, status counts, Python/OS

@@ -20,7 +20,7 @@ from dataclasses import dataclass, field, asdict
 from .vina_manager import no_window_flags, check_vina
 from .pdbqt_tools import check_receptor_pdbqt, scan_ligands, stage_records, LigandRecord
 
-TOOL_VERSION = "0.4.0"
+TOOL_VERSION = "0.5.0"
 SCORING_FUNCTIONS = ("vina", "vinardo")
 VINA_VOLUME_WARN = 27000.0  # Å^3, Vina's own warning threshold
 
@@ -564,7 +564,7 @@ def load_results_dir(workdir):
     return jobs
 
 
-POSE_CSV_HEADER = ["ligand", "pose", "affinity_kcal_mol", "rmsd_lb", "rmsd_ub", "rating", "hbonds", "clashes",
+POSE_CSV_HEADER = ["ligand", "pose", "affinity_kcal_mol", "rmsd_lb", "rmsd_ub", "rating", "hbonds", "hbonds_relaxed", "clashes",
                    "hbond_partners", "seed", "status", "error"]
 
 
@@ -581,7 +581,7 @@ def write_pose_csv(jobs, path, analysis=None, only=None):
             seed = "" if j.seed is None else j.seed
             if not j.poses:
                 if only is None:
-                    w.writerow([j.name, "", "", "", "", "", "", "", "", seed, j.status, j.error])
+                    w.writerow([j.name, "", "", "", "", "", "", "", "", "", seed, j.status, j.error])
                 continue
             for n, (aff, lb, ub) in enumerate(j.poses, start=1):
                 rec = analysis.get(j.name, n) if analysis is not None else {}
@@ -589,6 +589,7 @@ def write_pose_csv(jobs, path, analysis=None, only=None):
                     continue
                 w.writerow([j.name, n, "%.3f" % aff, "%.3f" % lb, "%.3f" % ub,
                             rec.get("rating") or "", "" if rec.get("hbonds") is None else rec["hbonds"],
+                            "" if rec.get("hbonds_relaxed") is None else rec["hbonds_relaxed"],
                             "" if rec.get("clashes") is None else rec["clashes"],
                             "; ".join(rec.get("hbond_partners", [])), seed, j.status, j.error])
 

@@ -285,3 +285,13 @@ def test_run_log_file(tmp_path):
     r = _run_two(tmp_path)
     text = open(os.path.join(r.workdir, "run_log.txt")).read()
     assert "Run started: Vina 1.2.7" in text and "best" in text and text.count("Docking p") >= 2
+
+
+def test_interaction_cache_roundtrip(tmp_path):
+    from ldsrc.analysis_store import InteractionCache
+    c = InteractionCache(str(tmp_path))
+    assert c.load("lig", 2) == {}
+    assert c.save("lig", 2, hbonds=[[0, 5, 1, 3.1]], n_ligand_atoms=4, n_receptor_atoms=9)
+    assert c.save("lig", 2, clashes=[[1, 2, 2.4]])
+    d = InteractionCache(str(tmp_path)).load("lig", 2)
+    assert d["hbonds"] == [[0, 5, 1, 3.1]] and d["clashes"] == [[1, 2, 2.4]] and d["n_receptor_atoms"] == 9

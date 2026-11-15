@@ -9,7 +9,7 @@ from Qt.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame,
     QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox, QPlainTextEdit,
     QProgressBar, QPushButton, QScrollArea, QSpinBox, QTabWidget, QTableWidget, QTableWidgetItem,
-    QVBoxLayout, QWidget,
+    QVBoxLayout, QWidget, QColorDialog,
 )
 from chimerax.core.tools import ToolInstance
 from chimerax.core.commands import run
@@ -168,8 +168,55 @@ class VinaPilotXTool(ToolInstance):
         n.setWordWrap(True)
         gl.addWidget(n)
         lay.addWidget(g)
+
+        from .pose_viewer import DEFAULT_COLORS
+        g = QGroupBox("Interaction colours")
+        gl = QVBoxLayout(g)
+        self._color_btns = {}
+        saved = self.controller.settings.get("colors") or {}
+        self._colors = {k: saved.get(k, v) for k, v in DEFAULT_COLORS.items()}
+        for key, label, tip in (
+                ("hbond", "H-bonds", "H-bonds that meet the standard criteria."),
+                ("hbond_relaxed", "H-bonds (relaxed criteria)", "H-bonds that only meet the relaxed distance/angle limits."),
+                ("clash", "Clashes", "Atom pairs closer than the clash cutoff.")):
+            row = QHBoxLayout()
+            row.addWidget(QLabel(label))
+            btn = QPushButton("")
+            btn.setFixedWidth(70)
+            btn.setToolTip(tip)
+            btn.clicked.connect(lambda _=False, k=key: self._pick_color(k))
+            self._color_btns[key] = btn
+            row.addWidget(btn)
+            row.addStretch(1)
+            gl.addLayout(row)
+        reset = QPushButton("Reset colours")
+        reset.clicked.connect(self._reset_colors)
+        gl.addWidget(reset)
+        self._paint_color_buttons()
+        lay.addWidget(g)
         lay.addStretch(1)
         return w
+
+    def _paint_color_buttons(self):
+        for k, btn in self._color_btns.items():
+            btn.setStyleSheet("background-color: %s; border: 1px solid #666;" % self._colors[k])
+
+    def _apply_colors(self):
+        self.controller.settings.set("colors", dict(self._colors))
+        self._paint_color_buttons()
+        if hasattr(self, "results"):
+            self.results.viewer.set_colors(self._colors)
+
+    def _pick_color(self, key):
+        c = QColorDialog.getColor(QColor(self._colors[key]), self.tool_window.ui_area, "Choose colour")
+        if c.isValid():
+            self._colors[key] = c.name()
+            self._apply_colors()
+
+    def _reset_colors(self):
+        from .pose_viewer import DEFAULT_COLORS
+        self._colors = dict(DEFAULT_COLORS)
+        self._apply_colors()
 
     def _native_toggled(self, checked):
         if getattr(self, "_restoring", False):
