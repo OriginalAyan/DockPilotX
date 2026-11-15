@@ -171,7 +171,7 @@ def test_seed_is_read_from_vina_output(tmp_path):
     assert all(isinstance(s, int) for s in seeds) and len(set(seeds)) == 4
     for j in r.jobs:                                   # nothing was forced on the command line
         assert "--seed" not in open(j.log_path).readline() and dk.seed_from_log(j.log_path) == j.seed
-    rows = list(csv.DictReader(open(os.path.join(r.workdir, "summary.csv"))))
+    rows = list(csv.DictReader(open(os.path.join(r.workdir, "best_per_ligand.csv"))))
     assert sorted(int(x["seed"]) for x in rows) == sorted(seeds)
     m = json.load(open(os.path.join(r.workdir, "manifest.json")))
     assert m["seeds"] == {j.name: j.seed for j in r.jobs} and "Vina chooses" in m["seed_policy"]
@@ -233,3 +233,55 @@ def test_ligand_csv_roundtrip(tmp_path):
     rows = list(csv.DictReader(open(out)))
     assert [r["ligand"] for r in rows] == ["bad", "a", "b"] and rows[0]["valid"] == "no" and rows[0]["problems"]   # files are read in sorted order
     assert rows[2]["torsions"] == "2" and rows[2]["longest_A"] == "30.00" and rows[2]["index_in_file"] == "2"
+
+
+# ---------- poses, CSV, extraction, analysis store, run log
+def _run_two(tmp_path):
+    ligs = [write(tmp_path / ("p%d.pdbqt" % i), helpers.lig_text("p%d" % i)) for i in range(2)]
+    r, _ = make_runner(tmp_path, ligs, params=dk.DockingParams(num_modes=3)); r.prepare(); r.run()
+    return r
+
+def test_all_poses_with_rmsd_in_summary_csv(tmp_path):
+    import csv
+    r = _run_two(tmp_path)
+    j = r.jobs[0]
+    assert len(j.poses) == 3 and j.poses[1][1:] == (1.1, 2.2) and j.best == min(p[0] for p in j.poses)
+    rows = list(csv.DictReader(open(os.path.join(r.workdir, "summary.csv"))))
+    assert len(rows) == 6 and [x["pose"] for x in rows[:3]] == ["1", "2", "3"]
+    assert rows[1]["rmsd_lb"] == "1.100" and rows[1]["rmsd_ub"] == "2.200" and "time" not in " ".join(rows[0].keys()).lower()
+    assert len(list(csv.DictReader(open(os.path.join(r.workdir, "best_per_ligand.csv"))))) == 2
+
+def test_failed_ligand_row_and_filter(tmp_path):
+    import csv
+    bad = write(tmp_path / "b.pdbqt", helpers.lig_text("b", extra="REMARK BADLIG\n"))
+    r, _ = make_runner(tmp_path, [str(bad)]); r.prepare(); r.run()
+    rows = list(csv.DictReader(open(os.path.join(r.workdir, "summary.csv"))))
+    assert len(rows) == 1 and rows[0]["status"] == "failed" and rows[0]["pose"] == "" and rows[0]["error"]
+
+def test_extract_pose(tmp_path):
+    r = _run_two(tmp_path)
+    j = r.jobs[0]
+    dst = dk.extract_pose(j.out_path, 2, str(tmp_path / "cache" / "x.pdbqt"))
+    txt = open(dst).read()
+    assert "MODEL" not in txt and txt.count("REMARK VINA RESULT") == 1 and "1.100" in txt and "   1.500" in txt
+    with pytest.raises(ValueError): dk.extract_pose(j.out_path, 9, str(tmp_path / "cache" / "y.pdbqt"))
+
+def test_analysis_store_and_csv(tmp_path):
+    import csv
+    from ldsrc.analysis_store import AnalysisStore
+    r = _run_two(tmp_path); a = AnalysisStore(r.workdir)
+    n = r.jobs[0].name
+    a.set(n, 2, rating=5, hbonds=3, clashes=0, hbond_partners=["LIG O1 - ASP A45 OD1"])
+    a.set(n, 3, rating=2)
+    b = AnalysisStore(r.workdir)                                        # reloaded from disk
+    assert b.get(n, 2)["hbonds"] == 3 and [x[:2] for x in b.rated(4)] == [(n, 2)] and len(b.rated(1)) == 2
+    b.set(n, 3, rating=0); assert len(b.rated(1)) == 1                  # clearing a rating
+    out = tmp_path / "rated.csv"
+    dk.write_pose_csv(r.jobs, str(out), b, only=lambda name, pose, rec: int(rec.get("rating") or 0) >= 4)
+    rows = list(csv.DictReader(open(out)))
+    assert len(rows) == 1 and rows[0]["pose"] == "2" and rows[0]["hbonds"] == "3" and rows[0]["clashes"] == "0" and "ASP" in rows[0]["hbond_partners"]
+
+def test_run_log_file(tmp_path):
+    r = _run_two(tmp_path)
+    text = open(os.path.join(r.workdir, "run_log.txt")).read()
+    assert "Run started: Vina 1.2.7" in text and "best" in text and text.count("Docking p") >= 2

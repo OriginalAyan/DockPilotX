@@ -236,8 +236,6 @@ class DockingController:
         self.runner = runner
         self.workdir = os.path.abspath(workdir)
         self.settings.set("last_workdir", self.workdir)
-        self.log("Vina %s | receptor %s | %d ligand(s) | box center (%.2f, %.2f, %.2f) size (%.2f, %.2f, %.2f)"
-                 % (self.vina_version, os.path.basename(receptor), len(jobs), *box_center, *box_size))
         self._emit("busy", True)
         self._emit("started", jobs)
         runner.start()

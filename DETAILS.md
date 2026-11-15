@@ -14,7 +14,7 @@ Lattice VinaPilotX runs **AutoDock Vina** from inside UCSF ChimeraX. It takes a 
 - Search-box editor: numeric entry, from selection, mouse move/resize, undo/redo.
 - **Batch docking** with parallel jobs, per-ligand progress bars, cancel, and **resume**.
 - Reproducible: Vina's reported **seed**, exact command, versions and parameters are saved with every run.
-- Poses open straight into ChimeraX/ViewDock; sortable results table; CSV export.
+- Expandable per-pose results, ratings, per-pose H-bonds/clashes, instant pose display with a capped cache, saved analysis, CSV export.
 - Optional switch that makes ChimeraX open `.pdbqt` files natively (fixes the "PDBT / Vinardock" error).
 - Everything is also scriptable with `dock ...` commands.
 
@@ -135,9 +135,13 @@ If a ligand already has a result and a log in the working folder, it is reused (
 
 ## 5. Results tab
 
-- Table of ligand, best affinity (kcal/mol), number of poses, runtime, seed and status; sortable; best affinities are sorted first when a run finishes.
-- **Open selected / Open top 5 / double-click** open the pose files with ChimeraX's PDBQT reader (multi-pose files appear in ViewDock), optionally together with the receptor.
-- **Export CSV** saves the table. **Load folder** rebuilds the table from an earlier working folder (reads `results/` and the logs).
+- **Expandable tree.** One row per ligand (best affinity, number of poses, seed, status, best rating). Expand it to list every pose: affinity, RMSD l.b., RMSD u.b., rating, H-bonds, clashes. Poses stay in pose order when you sort; ligand rows sort by any column.
+- **Instant display.** Selecting a pose shows it (with the receptor) and hides the previous one. Each pose is extracted from the Vina output into `pose_cache/` and opened once; at most *Max poses kept open* (default 5) stay loaded, and the least recently used is closed (with its bonds). The receptor is opened once and reused.
+- **Rating.** A 1–5 star box per pose, stored in `analysis.json`. **Save rated poses…** copies poses at or above a chosen rating, plus a CSV and the receptor, into `selected_poses/`.
+- **H-bonds / Clashes.** Select pose(s) and click: runs ChimeraX `hbonds` / `clashes` between that pose and the receptor, puts the counts in the table (partners in the H-bond tooltip) and leaves the bonds visible. Up to 3 poses per click. Other interaction types are planned.
+- **Open in ViewDock** opens the whole output file of the selected ligand(s) (once).
+- **Export CSV** writes every pose with rating, H-bonds, clashes and partners. **Load folder…** rebuilds the tree from a working folder, including ratings and saved H-bond/clash results, so analysis continues where you stopped.
+- The Run-tab log is saved to `run_log.txt` in the working folder.
 
 ---
 
@@ -149,9 +153,15 @@ ligands/<name>.pdbqt       one file per ligand (libraries split)
 results/<name>_out.pdbqt   Vina poses (REMARK VINA RESULT lines give the affinities)
 logs/<name>.log            command line + Vina console output
 vina_config.txt            box and search parameters shared by all ligands
-summary.csv                ligand, status, best affinity, poses, runtime, seed, output file, error
+summary.csv                one row per POSE: ligand, pose, affinity, rmsd_lb, rmsd_ub, rating,
+                           hbonds, clashes, hbond_partners, seed, status, error
+best_per_ligand.csv        one row per ligand (best affinity, poses, seed, status)
+run_log.txt                timestamped copy of the Run-tab log
+analysis.json              ratings, H-bond and clash results
+pose_cache/                single-pose files used for display (safe to delete)
+selected_poses/            written by "Save rated poses…"
 manifest.json              tool/Vina versions, receptor, box, parameters, seed policy and seeds,
-                           an example command, status counts, timings, Python/OS
+                           an example command, status counts, Python/OS
 ```
 
 ---

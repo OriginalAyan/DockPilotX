@@ -85,7 +85,6 @@ class VinaPilotXTool(ToolInstance):
         from chimerax.ui import MainToolWindow
         self.tool_window = MainToolWindow(self)
         self.controller = get_controller(session)
-        self._rows = {}               # results: job name -> (items, job)
         self._records = {}            # ligand table: id -> LigandRecord
         self._used_names = set()
         self._next_rid = 0
@@ -677,128 +676,24 @@ class VinaPilotXTool(ToolInstance):
 
     # ---- Results -----------------------------------------------------
     def _build_results_tab(self):
-        w = QWidget()
-        lay = QVBoxLayout(w)
-        self.table = QTableWidget(0, 6)
-        self.table.setHorizontalHeaderLabels(["Ligand", "Best (kcal/mol)", "Poses", "Time (s)", "Seed", "Status"])
-        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.table.setSortingEnabled(True)
-        self.table.setMinimumHeight(220)
-        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        self.table.cellDoubleClicked.connect(lambda *_: self._open_selected())
-        lay.addWidget(self.table, 1)
-        self.with_receptor_cb = QCheckBox("Also open the receptor")
-        self.with_receptor_cb.setChecked(True)
-        lay.addWidget(self.with_receptor_cb)
-        row = QHBoxLayout()
-        for text, slot in (("Open selected", self._open_selected), ("Open top 5", self._open_top),
-                           ("Export CSV…", self._export_csv), ("Load folder…", self._load_folder)):
-            b = QPushButton(text)
-            b.clicked.connect(slot)
-            row.addWidget(b)
-        lay.addLayout(row)
-        self.results_note = QLabel("Double-click a row to open its poses.")
-        self.results_note.setWordWrap(True)
-        lay.addWidget(self.results_note)
-        return w
+        from .results_tab import ResultsTab
+        self.results = ResultsTab(self.session, self.controller, self)
+        return self.results
 
-    def _fill_table(self, jobs):
-        self.table.setSortingEnabled(False)
-        self.table.setRowCount(0)
-        self._rows = {}
-        self.table.setRowCount(len(jobs))
-        for r, job in enumerate(jobs):
-            items = [QTableWidgetItem(job.name), _NumItem(""), _NumItem("", 0), _NumItem("", 0),
-                     _NumItem(""), QTableWidgetItem("")]
-            for c, it in enumerate(items):
-                it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEditable)
-                self.table.setItem(r, c, it)
-            self._rows[job.name] = (items, job)
-            self._update_row(job)
-        self.table.setSortingEnabled(True)
+    # PoseViewer host interface: the receptor is opened once and reused
+    @property
+    def receptor_path_hint(self):
+        return self._receptor_path
 
-    def _update_row(self, job):
-        entry = self._rows.get(job.name)
-        if entry is None:
-            return
-        items, _ = entry
-        items[1].setText("" if job.best is None else "%.2f" % job.best); items[1]._value = job.best
-        items[2].setText(str(job.n_poses)); items[2]._value = job.n_poses
-        items[3].setText("%.1f" % job.seconds if job.seconds else ""); items[3]._value = job.seconds
-        items[4].setText("" if job.seed is None else str(job.seed)); items[4]._value = job.seed
-        status = job.status
-        if job.status == docking.STATUS_RUNNING:
-            status = "running %d%%" % job.progress
-        elif job.error:
-            status = "%s: %s" % (job.status, job.error)
-        items[5].setText(status)
-        items[5].setToolTip(job.error or "")
+    def get_receptor_models(self):
+        return list(self._receptor_models)
 
-    def _selected_jobs(self):
-        names = {self.table.item(i.row(), 0).text() for i in self.table.selectedIndexes()}
-        return [self._rows[n][1] for n in names if n in self._rows]
+    def set_receptor_models(self, models, path):
+        self._receptor_models = list(models)
+        self._receptor_path = os.path.normcase(os.path.abspath(path))
 
-    def _open_jobs(self, jobs):
-        jobs = [j for j in jobs if os.path.isfile(j.out_path) and j.best is not None]
-        if not jobs:
-            self.results_note.setText("Nothing to open: select ligands that finished docking.")
-            return
-        if self.with_receptor_cb.isChecked():
-            rec = self._receptor_for_results()
-            if rec and not self._receptor_models:
-                run(self.session, 'open "%s" format pdbqt' % _chimerax_path(rec))
-        for j in sorted(jobs, key=lambda j: j.best):
-            run(self.session, 'open "%s" format pdbqt' % _chimerax_path(j.out_path))
-
-    def _receptor_for_results(self):
-        c = self.controller
-        if c.runner is not None and c.runner.receptor and os.path.isfile(c.runner.receptor):
-            return c.runner.receptor
-        rdir = os.path.join(self.workdir_edit.text().strip(), "receptor")
-        if os.path.isdir(rdir):
-            for f in sorted(os.listdir(rdir)):
-                if f.lower().endswith(".pdbqt"):
-                    return os.path.join(rdir, f)
-        return None
-
-    def _open_selected(self):
-        self._open_jobs(self._selected_jobs())
-
-    def _open_top(self):
-        jobs = [e[1] for e in self._rows.values() if e[1].best is not None]
-        jobs.sort(key=lambda j: j.best)
-        self._open_jobs(jobs[:5])
-
-    def _export_csv(self):
-        if not self._rows:
-            return
-        path, _ = QFileDialog.getSaveFileName(self.tool_window.ui_area, "Export results",
-                                              os.path.join(self.workdir_edit.text() or "", "results_table.csv"),
-                                              "CSV (*.csv)")
-        if not path:
-            return
-        with open(path, "w", newline="", encoding="utf-8") as f:
-            w = csv.writer(f)
-            w.writerow(["ligand", "best_affinity_kcal_mol", "n_poses", "runtime_s", "seed", "status", "error"])
-            for _, job in sorted(self._rows.values(), key=lambda e: (e[1].best is None, e[1].best or 0)):
-                w.writerow([job.name, "" if job.best is None else "%.3f" % job.best, job.n_poses,
-                            "%.1f" % job.seconds, "" if job.seed is None else job.seed, job.status, job.error])
-        self.results_note.setText("Exported %s" % path)
-
-    def _load_folder(self):
-        d = QFileDialog.getExistingDirectory(self.tool_window.ui_area, "Select a Lattice VinaPilotX working directory",
-                                             self._start_dir(self.workdir_edit.text()))
-        if not d:
-            return
-        jobs = docking.load_results_dir(d)
-        if not jobs:
-            self.results_note.setText("No Vina results found in %s/results" % d)
-            return
-        self.workdir_edit.setText(d)
-        self._fill_table(jobs)
-        self.results_note.setText("Loaded %d result(s) from %s" % (len(jobs), d))
+    def close_receptor(self):
+        self._close_receptor_models()
 
     # ---------------------------------------------------------- settings
     def _restore_settings(self):
@@ -857,12 +752,13 @@ class VinaPilotXTool(ToolInstance):
             if total:
                 self.dl_bar.setRange(0, 100); self.dl_bar.setValue(int(100 * done / total))
         elif event == "started":
-            self._fill_table(payload)
+            runner = self.controller.runner
+            self.results.set_jobs(payload, runner.workdir, runner.receptor)
             self._make_slots(min(self.parallel_spin.value(), len(payload)))
             self.counter_label.setText("Ligands completed: 0 / %d" % len(payload))
             self.run_status.setText("Docking %d ligand(s) ..." % len(payload))
         elif event == "job":
-            self._update_row(payload)
+            self.results.update_job(payload)
             self._job_progress(payload)
         elif event == "progress":
             done, total = payload
@@ -871,7 +767,7 @@ class VinaPilotXTool(ToolInstance):
             self.activity.appendPlainText(str(payload))
         elif event == "finished":
             self.run_status.setText("Finished. Results are in %s" % payload.workdir)
-            self.table.sortItems(1, Qt.SortOrder.AscendingOrder)
+            self.results.sort_by_best()
             self.tabs.setCurrentIndex(4)
             self.run_btn.setEnabled(True); self.cancel_btn.setEnabled(False)
 
@@ -881,6 +777,10 @@ class VinaPilotXTool(ToolInstance):
 
     def delete(self):
         self.controller.remove_listener(self._on_event)
+        try:
+            self.results.close()
+        except Exception:
+            pass
         try:
             self.box_panel.cleanup()
         except RuntimeError:

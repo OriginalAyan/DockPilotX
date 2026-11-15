@@ -28,13 +28,18 @@ class UndoAction:
     def __init__(self, name): self.name = name
 mod("chimerax.core.undo", UndoAction=UndoAction)
 ran = []
+_ids = [10]
 class _Atoms:
     def __init__(self): self.scene_coords = np.array([[0, 0, 0], [30, 10, 5.0]]); self.__len = 2
     def __len__(self): return 2
 def _run(sess, text):
     ran.append(text)
     if text.startswith("open ") and "format pdbqt" in text:
-        m = Model(text, sess); m.atoms = _Atoms(); m.id = (len(sess.models.items) + 1,); sess.models.items.append(m)
+        m = Model(text, sess); m.atoms = _Atoms(); _ids[0] += 1; m.id = (_ids[0],); sess.models.items.append(m)
+    elif text.startswith(("hbonds", "clashes")):
+        nm = text.split(" name ")[1].split()[0]
+        g = PseudobondGroup(nm, sess); g.name = nm; _ids[0] += 1; g.id = (_ids[0],); g.num_pseudobonds = 2 if text.startswith("hbonds") else 1
+        g.pseudobonds = []; sess.models.items.append(g)
 mod("chimerax.core.commands", run=_run, CmdDesc=object, EnumOf=lambda x: x, FloatArg=1, Float3Arg=1, IntArg=1, StringArg=1, BoolArg=1)
 class UserError(Exception): pass
 mod("chimerax.core.errors", UserError=UserError)
@@ -46,7 +51,9 @@ class MainToolWindow:
     def __init__(self, tool): self.ui_area = QtWidgets.QWidget(); self.shown = False
     def manage(self, placement=None): self.ui_area.show()
 mod("chimerax.ui", MainToolWindow=MainToolWindow)
-mod("chimerax.atomic", selected_atoms=lambda s: [])
+class PseudobondGroup(Model):
+    pass
+mod("chimerax.atomic", selected_atoms=lambda s: [], PseudobondGroup=PseudobondGroup)
 mod("chimerax.app_dirs", user_data_dir=tempfile.mkdtemp())
 sys.modules["chimerax"].app_dirs = sys.modules["chimerax.app_dirs"]
 mod("chimerax.core.toolshed", BundleAPI=object)
@@ -76,7 +83,9 @@ class UI:
 class Models:
     def __init__(self): self.items = []
     def add(self, ms): self.items += ms
-    def list(self): return [m for m in self.items if not m.deleted]
+    def list(self, type=None): return [m for m in self.items if not m.deleted and (type is None or isinstance(m, type))]
+    def close(self, ms):
+        for m in ms: m.delete()
 class Undo:
     undo_stack = []
     def register(self, a): self.undo_stack.append(a)
@@ -166,16 +175,52 @@ while tool.controller.running or time.time() - t0 < 0.5:
     app.processEvents(); time.sleep(0.02)
     if time.time() - t0 > 30: raise SystemExit("timeout")
 for _ in range(60): app.processEvents(); time.sleep(0.01)
-R = tool.table
-print("results:", [[R.item(r, c).text() for c in range(R.columnCount())] for r in range(R.rowCount())])
-assert R.rowCount() == 3 and all(R.item(r, 1).text() for r in range(3))
-seeds = [int(R.item(r, 4).text()) for r in range(3)]; assert len(set(seeds)) == 3   # read from Vina's output
+from PySide6.QtCore import Qt as _Qt
+T = tool.results.tree
+print("results:", [[T.topLevelItem(r).text(c) for c in range(T.columnCount())] for r in range(T.topLevelItemCount())])
+assert T.topLevelItemCount() == 3 and all(T.topLevelItem(r).text(1) for r in range(3))
+assert [T.headerItem().text(c) for c in range(T.columnCount())][:4] == ["Ligand / pose", "Affinity (kcal/mol)", "RMSD l.b.", "RMSD u.b."]
+assert "Time" not in [T.headerItem().text(c) for c in range(T.columnCount())]
+seeds = [int(T.topLevelItem(r).text(8)) for r in range(3)]; assert len(set(seeds)) == 3   # read from Vina's output
 assert "3 / 3" in tool.counter_label.text()
 assert all(s[1].value() == 100 for s in tool._slots), [s[1].value() for s in tool._slots]
 assert tool.tabs.currentIndex() == 4 and tool.run_btn.isEnabled() and not tool.cancel_btn.isEnabled()
-assert "seed" in open(os.path.join(tmp, "work", "summary.csv")).readline()
-R.selectAll(); tool._open_selected()
-assert sum("_out.pdbqt" in c for c in ran) == 3
+W = os.path.join(tmp, "work")
+rows_ = list(__import__("csv").DictReader(open(os.path.join(W, "summary.csv"))))
+assert len(rows_) >= 3 and {"pose", "rmsd_lb", "rmsd_ub", "rating"} <= set(rows_[0]) and "time" not in "".join(rows_[0]).lower()
+assert os.path.isfile(os.path.join(W, "run_log.txt"))
+# expand: all poses listed, receptor never reopened
+R = tool.results
+top = T.topLevelItem(0); top.setExpanded(True)
+assert top.childCount() == top.job.n_poses and top.childCount() > 1
+n_rec_open = sum("rec" in c and c.startswith("open ") for c in ran)
+# select pose 1, then each pose: cache capped at 5, receptor opened only by the tool (not again)
+R.viewer.max_open = 3
+for i in range(top.childCount()):
+    T.clearSelection(); top.child(i).setSelected(True); R._apply_selection()
+open_poses = [e for e in R.viewer._entries.values() if not e.model.deleted]
+assert len(open_poses) <= 3, len(open_poses)
+assert sum("rec" in c and c.startswith("open ") for c in ran) == n_rec_open, "receptor was reopened"
+# rating persists
+child = top.child(1); combo = T.itemWidget(child, 4); combo.setCurrentIndex(5)
+assert R.store.get(top.job.name, 2)["rating"] == 5
+# H-bonds / clashes for the selected pose
+T.clearSelection(); child.setSelected(True); R.analyze("hbonds"); R.analyze("clashes")
+assert child.text(5) == "2" and child.text(6) == "1", (child.text(5), child.text(6))
+assert os.path.isfile(os.path.join(W, "analysis.json"))
+# reload the folder in a fresh results tab state: rating + analysis restored
+assert R.load_workdir(W)
+top2 = T.topLevelItem(0)
+for r in range(T.topLevelItemCount()):
+    if T.topLevelItem(r).job.name == top.job.name: top2 = T.topLevelItem(r)
+top2.setExpanded(True)
+assert top2.child(1).text(5) == "2" and T.itemWidget(top2.child(1), 4).currentIndex() == 5
+assert top2.text(4) == "★★★★★"
+# save rated poses
+R.min_rating.setValue(4); R.save_rated()
+sel = os.path.join(W, "selected_poses"); assert os.path.isdir(sel) and any(f.endswith(".pdbqt") for f in os.listdir(sel))
+# viewdock + csv export helpers do not crash
+R.tree.clearSelection()
 cfg = open(os.path.join(tmp, "work", "vina_config.txt")).read(); assert "exhaustiveness = 16" in cfg and "size_x = 22.0000" in cfg
 # reset defaults + progress bar style
 tool._reset_defaults(); assert tool.exh_spin.value() == 8 and tool.parallel_spin.value() == 1 and tool.seed_spin.value() == 0

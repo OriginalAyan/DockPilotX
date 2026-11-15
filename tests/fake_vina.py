@@ -26,6 +26,6 @@ sys.stdout.write("\n")
 n = int(cfg["num_modes"]); base = -5.0 - (len(lig) % 40) / 10.0
 with open(opt("--out"), "w") as f:
     for i in range(min(n, 3)):
-        f.write("MODEL %d\nREMARK VINA RESULT:   %6.3f      0.000      0.000\n" % (i + 1, base + 0.4 * i))
-        f.write("ATOM      1  C   LIG A   1       0.000   0.000   0.000  0.00  0.00    +0.000 C \nENDMDL\n")
+        f.write("MODEL %d\nREMARK VINA RESULT:   %6.3f  %9.3f  %9.3f\n" % (i + 1, base + 0.4 * i, i * 1.1, i * 2.2))
+        f.write("ATOM      1  C   LIG A   1    %8.3f   0.000   0.000  0.00  0.00    +0.000 C \nENDMDL\n" % (i * 1.5))
 print("mode |   affinity | dist from best mode\n     | (kcal/mol) | rmsd l.b.| rmsd u.b.\n-----+------------+----------+----------")
