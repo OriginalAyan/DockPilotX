@@ -55,6 +55,9 @@ def _mk_structure(sess, name, natoms, shown=None):
         if i % 2 == 0: res.append(Residue("RES", len(res) + 1))
         a = Atom(m, "A%d" % i, res[-1], True if shown is None else shown(i)); res[-1].atoms.append(a); m.atoms.append(a)
     return m
+class ViewDockTool:
+    deleted = False
+    def delete(self): self.deleted = True
 _ids = [10]
 def _by_spec(sess, spec):
     ids = tuple(int(x) for x in spec.lstrip("#").split("."))
@@ -67,6 +70,7 @@ def _run(sess, text):
     if text.startswith("open ") and "format pdbqt" in text:
         _ids[0] += 1
         if "_out.pdbqt" in text:
+            sess.tools.items.append(ViewDockTool())
             m = Model("out", sess); m.id = (_ids[0],); m.atoms = _Atoms()
             for k in range(1, 4):
                 c = _mk_structure(sess, "pose%d" % k, 4); c.id = (_ids[0], k); m.add([c])
@@ -79,8 +83,9 @@ def _run(sess, text):
         lig, rec = _by_spec(sess, specs[0]), _by_spec(sess, specs[1] if text.startswith("hbonds") else text.split("restrict ")[1].split()[0].split(",")[0])
         g = PBGroup(nm, sess); _ids[0] += 1; g.id = (_ids[0],)
         if text.startswith("hbonds"):
-            g.new_pseudobond(lig.atoms[0], rec.atoms[2])
-            if " relax true" in text: g.new_pseudobond(lig.atoms[1], rec.atoms[3])
+            assert " twoColors true slopColor #fe12ab" in text and "relax" not in text
+            g.new_pseudobond(lig.atoms[0], rec.atoms[2]).color = [0, 0, 0, 255]
+            g.new_pseudobond(lig.atoms[1], rec.atoms[3]).color = [254, 18, 171, 255]
         else:
             g.new_pseudobond(lig.atoms[1], rec.atoms[0])
         sess.models.items.append(g)
@@ -140,6 +145,10 @@ class PBMgr:
             if isinstance(m, PBGroup) and m.name == name and not m.deleted: return m
         g = PBGroup(name, session); _ids[0] += 1; g.id = (_ids[0],); session.models.items.append(g); return g
 session.pb_manager = PBMgr()
+class Tools:
+    items = []
+    def list(self): return [t for t in self.items if not t.deleted]
+session.tools = Tools()
 session.triggers = types.SimpleNamespace(add_handler=lambda *a: 1, remove_handler=lambda h: None)
 
 class Formats:
@@ -248,6 +257,7 @@ n_rec = n_open(lambda c: "_out.pdbqt" not in c)
 T.clearSelection(); top.child(0).setSelected(True); R._apply_selection()
 name0 = top.job.name
 assert n_open(lambda c: name0 + "_out.pdbqt" in c) == 1
+assert not session.tools.list(), 'ViewDock window must be closed again'
 ent = R.viewer._entries[name0]; assert len(ent.poses) == 3
 assert [m.display for m in ent.poses] == [True, False, False]
 for i in (1, 2, 0):

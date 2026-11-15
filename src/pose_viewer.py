@@ -17,6 +17,7 @@ from chimerax.core.commands import run
 from .analysis_store import InteractionCache
 
 DEFAULT_COLORS = {"hbond": "#00bfff", "hbond_relaxed": "#2f6fd6", "clash": "#ff6a00"}
+SLOP_SENTINEL = "#fe12ab"   # marker colour: bonds drawn in it met only the relaxed criteria
 HB_GROUP, CL_GROUP = "Lattice H-bonds", "Lattice clashes"
 
 
@@ -89,9 +90,33 @@ class PoseViewer:
     def _top_models(self):
         return [m for m in self.session.models.list() if len(m.id) == 1]
 
-    def _open(self, path):
+    def _viewdock_tools(self):
+        try:
+            return [t for t in self.session.tools.list()
+                    if type(t).__name__ == "ViewDockTool" or getattr(t, "tool_name", "") == "ViewDock"]
+        except Exception:
+            return []
+
+    def _close_new_viewdock(self, before):
+        for t in self._viewdock_tools():
+            if t not in before:
+                try:
+                    t.delete()
+                except Exception:
+                    pass
+
+    def _open(self, path, quiet_viewdock=False):
+        """Open a file; with *quiet_viewdock* the ViewDock window that ChimeraX starts for it is closed again."""
         before = set(self._top_models())
+        vd_before = list(self._viewdock_tools()) if quiet_viewdock else []
         run(self.session, 'open "%s" format pdbqt' % os.path.abspath(path).replace("\\", "/"))
+        if quiet_viewdock:
+            self._close_new_viewdock(vd_before)
+            try:  # ChimeraX may start ViewDock a moment after the open command returns
+                from Qt.QtCore import QTimer
+                QTimer.singleShot(300, lambda: self._close_new_viewdock(vd_before))
+            except Exception:
+                pass
         return [m for m in self._top_models() if m not in before]
 
     def ensure_receptor(self):
@@ -128,7 +153,7 @@ class PoseViewer:
             return entry
         if entry is not None:
             self._evict(job.name)
-        new = self._open(job.out_path)
+        new = self._open(job.out_path, quiet_viewdock=True)
         if not new:
             raise RuntimeError("ChimeraX did not open %s" % job.out_path)
         if len(new) == 1:
@@ -257,6 +282,9 @@ class PoseViewer:
             name = HB_GROUP if kind == "hb" else CL_GROUP
             g = self.session.pb_manager.get_group(name)
             try:
+                if getattr(g, "id", None) is None:
+                    self.session.models.add([g])
+                g.display = True
                 g.dashes = 6
             except Exception:
                 pass
@@ -292,6 +320,7 @@ class PoseViewer:
             try:
                 pb.color = self._color_of(kind)
                 pb.radius = 0.08
+                pb.display = True
             except Exception:
                 pass
             keep.append((pb, kind))
@@ -331,10 +360,14 @@ class PoseViewer:
             try:
                 for pb in group.pseudobonds:
                     a, b = pb.atoms
+                    try:
+                        col = tuple(int(x) for x in pb.color[:3])
+                    except Exception:
+                        col = None
                     if a.structure is lig_structure and b.structure in rec_set:
-                        out.append((a, b, float(pb.length)))
+                        out.append((a, b, float(pb.length), col))
                     elif b.structure is lig_structure and a.structure in rec_set:
-                        out.append((b, a, float(pb.length)))
+                        out.append((b, a, float(pb.length), col))
             except Exception:
                 pass
             try:
@@ -362,14 +395,13 @@ class PoseViewer:
         li = {a: i for i, a in enumerate(lat)}
         ri = {a: i for i, a in enumerate(rat)}
         if kind == "hbonds":
-            base = "hbonds %s,%s restrict %s interModel true intraMol false reveal false select false " \
-                   "log false makePseudobonds true name %s" % (lig, rec, lig, tmp)
-            strict = self._pairs(base + " relax false", tmp, pose, receptors)
-            allp = self._pairs(base + " relax true", tmp, pose, receptors)
-            strict_keys = {(a, b) for a, b, _ in strict}
-            items = [(a, b, "hbond") for a, b, _ in strict]
-            items += [(a, b, "hbond_relaxed") for a, b, _ in allp if (a, b) not in strict_keys]
-            dist = {(a, b): d for a, b, d in allp}
+            # one run: ChimeraX colours bonds that only meet the relaxed criteria with slopColor
+            cmd = "hbonds %s,%s restrict %s interModel true intraMol false reveal false select false " \
+                  "log false makePseudobonds true twoColors true slopColor %s name %s" % (lig, rec, lig, SLOP_SENTINEL, tmp)
+            found = self._pairs(cmd, tmp, pose, receptors)
+            slop = tuple(hex_to_rgba(SLOP_SENTINEL)[:3])
+            items = [(a, b, "hbond_relaxed" if col == slop else "hbond") for a, b, _, col in found]
+            dist = {(a, b): d for a, b, d, _ in found}
             group_kind = "hb"
             saved = {"hbonds": [[li[a], ri[b], 1 if k == "hbond_relaxed" else 0, round(dist.get((a, b), 0.0), 3)]
                                 for a, b, k in items]}
@@ -377,9 +409,9 @@ class PoseViewer:
             cmd = "clashes %s restrict %s interModel true intraMol false reveal false select false " \
                   "log false makePseudobonds true name %s" % (lig, rec, tmp)
             found = self._pairs(cmd, tmp, pose, receptors)
-            items = [(a, b, "clash") for a, b, _ in found]
+            items = [(a, b, "clash") for a, b, _, _c in found]
             group_kind = "cl"
-            saved = {"clashes": [[li[a], ri[b], round(d, 3)] for a, b, d in found]}
+            saved = {"clashes": [[li[a], ri[b], round(d, 3)] for a, b, d, _c in found]}
         self._draw(entry, pose_no, items, group_kind)
         saved.update(n_ligand_atoms=len(lat), n_receptor_atoms=len(rat))
         if self.cache is not None:
