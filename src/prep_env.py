@@ -288,6 +288,25 @@ def _quiet(log):
     return out
 
 
+def short_base_dir(default_dir):
+    """Folder for the conda environment. Windows limits paths to 260 characters and conda packages nest
+    deeply, so use a short folder (drive root, else %LOCALAPPDATA%) there; elsewhere *default_dir*."""
+    if not sys.platform.startswith("win"):
+        return default_dir
+    local = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    for root in (os.path.splitdrive(local)[0] + "\\vpx", os.path.join(local, "vpx")):
+        try:
+            os.makedirs(root, exist_ok=True)
+            test = os.path.join(root, ".write_test")
+            with open(test, "w") as f:
+                f.write("x")
+            os.remove(test)
+            return os.path.join(root, "mm")
+        except OSError:
+            continue
+    return default_dir
+
+
 def create_micromamba_env(base_dir, log=None, cancelled=None, packages=None):
     """Download micromamba and create the conda-forge environment under *base_dir*."""
     mamba = os.path.join(base_dir, "micromamba" + (".exe" if sys.platform.startswith("win") else ""))
@@ -301,10 +320,18 @@ def create_micromamba_env(base_dir, log=None, cancelled=None, packages=None):
            "--override-channels"] + list(packages or CONDA_PACKAGES)
     if log:
         log("Creating the environment (this can take several minutes) ...")
-    code = run_stream(cmd, _quiet(log), cancelled, idle_timeout=900)
+    try:
+        code = run_stream(cmd, _quiet(log), cancelled, idle_timeout=900)
+    except PrepError:
+        shutil.rmtree(base_dir, ignore_errors=True)
+        raise
     if code == -1:
+        shutil.rmtree(base_dir, ignore_errors=True)
         raise PrepError("Cancelled.")
     if code != 0:
+        if log:
+            log("Removing the partly created environment ...")
+        shutil.rmtree(base_dir, ignore_errors=True)
         raise PrepError("micromamba could not create the environment (exit code %d)." % code)
     return PrepEnv("micromamba", prefix=prefix, mamba=mamba, root=root)
 

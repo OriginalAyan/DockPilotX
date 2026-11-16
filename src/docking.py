@@ -20,7 +20,7 @@ from dataclasses import dataclass, field, asdict
 from .vina_manager import no_window_flags, check_vina
 from .pdbqt_tools import check_receptor_pdbqt, scan_ligands, stage_records, LigandRecord
 
-TOOL_VERSION = "0.6.0"
+TOOL_VERSION = "0.6.1"
 SCORING_FUNCTIONS = ("vina", "vinardo")
 VINA_VOLUME_WARN = 27000.0  # Å^3, Vina's own warning threshold
 

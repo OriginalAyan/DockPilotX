@@ -183,7 +183,8 @@ class DockingController:
             env, errors = None, []
             if method in ("auto", "micromamba"):
                 try:
-                    env = prep_env.create_micromamba_env(os.path.join(base_dir, "micromamba"), log, cancelled)
+                    env = prep_env.create_micromamba_env(
+                        prep_env.short_base_dir(os.path.join(base_dir, "micromamba")), log, cancelled)
                     res = prep_env.probe(env)
                     if not res["ok"]:
                         raise prep_env.PrepError(res["message"])
@@ -196,7 +197,7 @@ class DockingController:
                     if method == "auto":
                         log("Trying the venv + pip fallback ...")
             if env is None and method in ("auto", "venv"):
-                env = prep_env.create_venv_env(os.path.join(base_dir, "venv"), log, cancelled)
+                env = prep_env.create_venv_env(base_dir, log, cancelled)
             if env is None:
                 raise prep_env.PrepError("; ".join(errors) or "Setup failed.")
             return env, prep_env.probe(env)
@@ -234,12 +235,15 @@ class DockingController:
         return self._prep_thread(work, done)
 
     def remove_prep_env(self):
-        base = os.path.abspath(self.prep_dir)
         env = self.prep_env
-        if env is not None and env.kind != "external":
-            target = env.prefix and os.path.dirname(os.path.abspath(env.prefix))
-            if target and os.path.abspath(target).startswith(base):
-                shutil.rmtree(target, ignore_errors=True)
+        target = None
+        if env is not None and env.prefix:
+            if env.kind == "micromamba" and os.path.basename(os.path.dirname(env.prefix)) in ("mm", "micromamba"):
+                target = os.path.dirname(env.prefix)
+            elif env.kind == "venv" and os.path.basename(env.prefix) == "venv":
+                target = env.prefix
+        if target:
+            shutil.rmtree(target, ignore_errors=True)
         self.prep_env, self.prep_info = None, {}
         self.settings.set("prep_env", None)
         self.settings.set("prep_info", {})
