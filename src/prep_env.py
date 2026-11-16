@@ -67,7 +67,7 @@ class PrepEnv:
         self.prefix = prefix        # env folder (micromamba / venv / external conda or venv folder)
         self.mamba = mamba          # micromamba executable (micromamba kind)
         self.root = root            # micromamba root prefix
-        self.python = python        # python executable (venv / external)
+        self.python = python or (python_in(prefix) if kind == "micromamba" and prefix else None)
 
     def to_dict(self):
         return {"kind": self.kind, "prefix": self.prefix, "mamba": self.mamba, "root": self.root,
@@ -80,12 +80,34 @@ class PrepEnv:
         return cls(d["kind"], d.get("prefix"), d.get("mamba"), d.get("root"), d.get("python"))
 
     def command(self, argv):
-        """argv (list) -> full command that runs it inside the environment."""
+        """argv (list) -> full command that runs it inside the environment.
+
+        Python is started directly (with ``environ()``): ``micromamba run`` goes through a batch file on
+        Windows, which breaks on multi-line or special-character arguments."""
+        if argv and argv[0] == "python":
+            return [self.python or python_in(self.prefix)] + list(argv[1:])
         if self.kind == "micromamba":
             return [self.mamba, "run", "-r", self.root, "-p", self.prefix] + list(argv)
-        if argv and argv[0] == "python":
-            return [self.python] + list(argv[1:])
         return list(argv)
+
+    def environ(self):
+        """Environment variables for running programs of this environment (None = inherit)."""
+        if self.kind == "external" or not self.prefix:
+            return None
+        env = dict(os.environ)
+        p = self.prefix
+        if sys.platform.startswith("win"):
+            extra = [p, os.path.join(p, "Library", "mingw-w64", "bin"), os.path.join(p, "Library", "usr", "bin"),
+                     os.path.join(p, "Library", "bin"), os.path.join(p, "Scripts"), os.path.join(p, "bin")]
+        else:
+            extra = [os.path.join(p, "bin")]
+        env["PATH"] = os.pathsep.join(extra + [env.get("PATH", "")])
+        env["PYTHONNOUSERSITE"] = "1"
+        if self.kind == "micromamba":
+            env["CONDA_PREFIX"] = p
+        env.pop("PYTHONHOME", None)
+        env.pop("PYTHONPATH", None)
+        return env
 
     def python_command(self, args):
         return self.command(["python"] + list(args))
@@ -169,10 +191,20 @@ def probe(env, timeout=180):
     if env is None or not env.exists():
         return {"ok": False, "message": "No preparation environment is set up.", "info": {}}
     lines = []
+    script = None
     try:
-        code = run_stream(env.python_command(["-c", _PROBE]), log=lines.append, timeout=timeout)
-    except PrepError as err:
+        fd, script = tempfile.mkstemp(suffix=".py", prefix="vpx_probe_")
+        with os.fdopen(fd, "w") as f:
+            f.write(_PROBE)
+        code = run_stream(env.python_command([script]), log=lines.append, timeout=timeout, env=env.environ())
+    except (PrepError, OSError) as err:
         return {"ok": False, "message": str(err), "info": {}}
+    finally:
+        if script:
+            try:
+                os.remove(script)
+            except OSError:
+                pass
     info = {}
     for line in lines:
         if line.startswith("VPXPROBE"):
@@ -181,7 +213,8 @@ def probe(env, timeout=180):
             except ValueError:
                 pass
     if not info:
-        return {"ok": False, "message": "The environment did not respond (exit code %s)." % code, "info": {}}
+        return {"ok": False, "message": "The environment did not respond (exit code %s): %s" % (
+            code, " | ".join(lines[-3:])[:300]), "info": {}}
     if not info.get("meeko"):
         return {"ok": False, "message": "Meeko is not installed in this environment.", "info": info}
     if not info.get("rdkit"):
@@ -200,7 +233,7 @@ def tool_argv(env, info, tool):
 def tool_help(env, info, tool, timeout=120):
     lines = []
     try:
-        run_stream(tool_argv(env, info, tool) + ["--help"], log=lines.append, timeout=timeout)
+        run_stream(tool_argv(env, info, tool) + ["--help"], log=lines.append, timeout=timeout, env=env.environ())
     except PrepError:
         return ""
     return "\n".join(lines)

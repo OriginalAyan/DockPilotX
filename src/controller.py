@@ -180,15 +180,17 @@ class DockingController:
 
         def work():
             log, cancelled = self._prep_log, self._prep_cancel.is_set
-            env, errors = None, []
+            env, errors, mm_base = None, [], None
             if method in ("auto", "micromamba"):
                 try:
-                    env = prep_env.create_micromamba_env(
-                        prep_env.short_base_dir(os.path.join(base_dir, "micromamba")), log, cancelled)
+                    mm_base = prep_env.short_base_dir(os.path.join(base_dir, "micromamba"))
+                    env = prep_env.create_micromamba_env(mm_base, log, cancelled)
                     res = prep_env.probe(env)
                     if not res["ok"]:
                         raise prep_env.PrepError(res["message"])
                 except prep_env.PrepError as err:
+                    if mm_base:
+                        shutil.rmtree(mm_base, ignore_errors=True)
                     if str(err) == "Cancelled.":
                         raise
                     errors.append("micromamba: %s" % err)

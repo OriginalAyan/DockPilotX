@@ -75,7 +75,7 @@ def prepare_receptor(env, info, clean_pdb, out_base, delete_bad=True, log=None, 
         if log:
             log(line)
 
-    code = run_stream(cmd, on_line, cancelled, cwd=os.path.dirname(out_base) or None)
+    code = run_stream(cmd, on_line, cancelled, cwd=os.path.dirname(out_base) or None, env=env.environ())
     if code == -1:
         raise PrepError("Cancelled.")
     produced = sorted(glob.glob(out_base + "*.pdbqt"))
@@ -115,7 +115,7 @@ def prepare_ligands(env, info, inputs, out_dir, stage_dir, add_h=True, log=None,
     cmd = env.python_command([_STAGE_SCRIPT, "--out", stage_dir] + (["--no-addh"] if not add_h else []) + files)
     if log:
         log("Reading %d ligand file(s) with RDKit ..." % len(files))
-    code = run_stream(cmd, on_line, cancelled)
+    code = run_stream(cmd, on_line, cancelled, env=env.environ())
     if code == -1:
         raise PrepError("Cancelled.")
     staged = [d for d in stage_lines if "staged" in d and d["staged"]]
@@ -141,7 +141,7 @@ def prepare_ligands(env, info, inputs, out_dir, stage_dir, add_h=True, log=None,
             cmd = base + ["-i", sdf, "--multimol_outdir", out_dir]
         if log:
             log("mk_prepare_ligand: %s (%d molecule%s)" % (os.path.basename(sdf), n, "" if n == 1 else "s"))
-        code = run_stream(cmd, lambda l: log(l) if log else None, cancelled)
+        code = run_stream(cmd, lambda l: log(l) if log else None, cancelled, env=env.environ())
         if code == -1:
             raise PrepError("Cancelled.")
         new = sorted(set(glob.glob(os.path.join(out_dir, "*.pdbqt"))) - before)

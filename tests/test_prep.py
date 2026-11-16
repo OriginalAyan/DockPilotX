@@ -26,7 +26,10 @@ def test_list_ligand_files(tmp_path):
 
 def test_env_commands_and_roundtrip(tmp_path):
     mm = pe.PrepEnv("micromamba", prefix="/e", mamba="/mm", root="/r")
-    assert mm.command(["python", "-m", "x"]) == ["/mm", "run", "-r", "/r", "-p", "/e", "python", "-m", "x"]
+    assert mm.command(["python", "-m", "x"])[1:] == ["-m", "x"] and "python" in mm.command(["python"])[0]
+    assert mm.command(["tool.py"]) == ["/mm", "run", "-r", "/r", "-p", "/e", "tool.py"]
+    assert mm.environ()["CONDA_PREFIX"] == "/e" and mm.environ()["PATH"].split(os.pathsep)[0] in ("/e", "/e/bin")
+    assert pe.PrepEnv("external", python="/p").environ() is None
     v = pe.PrepEnv("venv", prefix="/v", python="/v/bin/python")
     assert v.python_command(["-c", "1"]) == ["/v/bin/python", "-c", "1"] and v.command(["tool.py"]) == ["tool.py"]
     assert pe.PrepEnv.from_dict(mm.to_dict()).to_dict() == mm.to_dict() and pe.PrepEnv.from_dict(None) is None
