@@ -1,6 +1,6 @@
 # VinaPilotX (working name) — AutoDock Vina in UCSF ChimeraX
 
-Runs **AutoDock Vina** from ChimeraX: search box, single and batch docking, results table. Inputs must already be prepared `.pdbqt` files (Meeko-based preparation is a later step).
+Runs **AutoDock Vina** from ChimeraX: Meeko-based receptor/ligand preparation, search box, single and batch docking, per-pose results with ratings, H-bonds and clashes.
 
 **Documentation: [DETAILS.md](DETAILS.md)** — highlights, how every feature works, and the command list.
 
@@ -14,6 +14,7 @@ devel build   <path-to-this-folder>     # wheel for the Toolshed
 ## Tests (outside ChimeraX)
 ```
 python -m pytest -q tests               # core logic, uses a fake Vina
+VPX_TEST_PYTHON=/path/to/python python -m pytest -q tests   # also runs real Meeko (needs meeko + rdkit there)
 python tests/gui_smoke.py               # offscreen GUI run with stub ChimeraX (needs PySide6-Essentials)
 ```
 

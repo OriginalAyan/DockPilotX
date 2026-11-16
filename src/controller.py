@@ -8,7 +8,9 @@ import json
 import os
 import threading
 
-from . import vina_manager, docking
+import shutil
+
+from . import vina_manager, docking, prep, prep_env
 from .docking import DockingParams, DockingRunner
 
 APP_NAME = "VinaPilotX"
@@ -72,6 +74,12 @@ class DockingController:
         self.vina_version = None
         self.workdir = None
         self._download_cancel = threading.Event()
+        self._prep_cancel = threading.Event()
+        self.prep_env = prep_env.PrepEnv.from_dict(self.settings.get("prep_env"))
+        self.prep_info = self.settings.get("prep_info") or {}
+        self.prep_message = ""
+        self.prep_ok = bool(self.prep_env and self.prep_env.exists() and self.prep_info.get("meeko"))
+        self.prep_busy = False
         self._downloading = False
         saved = self.settings.get("vina_path")
         if saved:
@@ -109,6 +117,158 @@ class DockingController:
 
     def _log_threadsafe(self, message):
         self.session.ui.thread_safe(self.log, message)
+
+    # ---- Meeko preparation environment ---------------------------------------
+    @property
+    def prep_dir(self):
+        return os.path.join(data_dir(), "prep")
+
+    def _prep_log(self, line):
+        self.session.ui.thread_safe(self._emit, "prep_log", line)
+
+    def _prep_set_busy(self, busy):
+        self.prep_busy = busy
+        self._emit("prep_busy", busy)
+
+    def _prep_apply(self, result):
+        self.prep_ok = bool(result.get("ok"))
+        self.prep_info = result.get("info", {})
+        self.prep_message = result.get("message", "")
+        self.settings.set("prep_info", self.prep_info if self.prep_ok else {})
+        self._emit("prep_env", result)
+
+    def cancel_prep(self):
+        self._prep_cancel.set()
+
+    def _prep_thread(self, work, done):
+        """Run work() in a thread; done(result, error) runs on the main thread."""
+        if self.prep_busy:
+            self.log("Another preparation task is still running.", "warning")
+            return False
+        self._prep_cancel.clear()
+        self._prep_set_busy(True)
+
+        def run():
+            try:
+                res, err = work(), None
+            except prep_env.PrepError as e:
+                res, err = None, str(e)
+            except Exception as e:  # never let a thread die silently
+                res, err = None, "%s: %s" % (type(e).__name__, e)
+
+            def finish():
+                self._prep_set_busy(False)
+                done(res, err)
+            self.session.ui.thread_safe(finish)
+        threading.Thread(target=run, daemon=True).start()
+        return True
+
+    def verify_prep(self):
+        """Check the saved environment (runs in the background)."""
+        env = self.prep_env
+
+        def work():
+            return prep_env.probe(env)
+
+        def done(res, err):
+            self._prep_apply(res if res else {"ok": False, "message": err or "failed", "info": {}})
+        return self._prep_thread(work, done)
+
+    def setup_prep_env(self, method="auto"):
+        """Create the Meeko environment: method 'auto' (micromamba, then venv), 'micromamba' or 'venv'."""
+        base_dir = self.prep_dir
+
+        def work():
+            log, cancelled = self._prep_log, self._prep_cancel.is_set
+            env, errors = None, []
+            if method in ("auto", "micromamba"):
+                try:
+                    env = prep_env.create_micromamba_env(os.path.join(base_dir, "micromamba"), log, cancelled)
+                    res = prep_env.probe(env)
+                    if not res["ok"]:
+                        raise prep_env.PrepError(res["message"])
+                except prep_env.PrepError as err:
+                    if str(err) == "Cancelled.":
+                        raise
+                    errors.append("micromamba: %s" % err)
+                    env = None
+                    log("micromamba route failed: %s" % err)
+                    if method == "auto":
+                        log("Trying the venv + pip fallback ...")
+            if env is None and method in ("auto", "venv"):
+                env = prep_env.create_venv_env(os.path.join(base_dir, "venv"), log, cancelled)
+            if env is None:
+                raise prep_env.PrepError("; ".join(errors) or "Setup failed.")
+            return env, prep_env.probe(env)
+
+        def done(res, err):
+            if err:
+                self._prep_apply({"ok": False, "message": err, "info": {}})
+                self.log("Meeko environment setup failed: %s" % err, "warning")
+                return
+            env, result = res
+            if result["ok"]:
+                self.prep_env = env
+                self.settings.set("prep_env", env.to_dict())
+            self._prep_apply(result)
+        return self._prep_thread(work, done)
+
+    def use_external_python(self, path):
+        env = prep_env.external_env(path)
+        if env is None:
+            self._prep_apply({"ok": False, "message": "No Python found at: %s" % path, "info": {}})
+            return False
+
+        def work():
+            return env, prep_env.probe(env)
+
+        def done(res, err):
+            if err:
+                self._prep_apply({"ok": False, "message": err, "info": {}})
+                return
+            env_, result = res
+            if result["ok"]:
+                self.prep_env = env_
+                self.settings.set("prep_env", env_.to_dict())
+            self._prep_apply(result)
+        return self._prep_thread(work, done)
+
+    def remove_prep_env(self):
+        base = os.path.abspath(self.prep_dir)
+        env = self.prep_env
+        if env is not None and env.kind != "external":
+            target = env.prefix and os.path.dirname(os.path.abspath(env.prefix))
+            if target and os.path.abspath(target).startswith(base):
+                shutil.rmtree(target, ignore_errors=True)
+        self.prep_env, self.prep_info = None, {}
+        self.settings.set("prep_env", None)
+        self.settings.set("prep_info", {})
+        self._prep_apply({"ok": False, "message": "No preparation environment is set up.", "info": {}})
+
+    def prepare_receptor_async(self, clean_pdb, out_base, delete_bad=True):
+        env, info = self.prep_env, self.prep_info
+
+        def work():
+            return prep.prepare_receptor(env, info, clean_pdb, out_base, delete_bad,
+                                         log=self._prep_log, cancelled=self._prep_cancel.is_set)
+
+        def done(res, err):
+            self._emit("prep_receptor_done", (res, err))
+        return self._prep_thread(work, done)
+
+    def prepare_ligands_async(self, inputs, out_dir, stage_dir, add_h=True):
+        env, info = self.prep_env, self.prep_info
+
+        def progress(d, t):
+            self.session.ui.thread_safe(self._emit, "prep_progress", (d, t))
+
+        def work():
+            return prep.prepare_ligands(env, info, inputs, out_dir, stage_dir, add_h, log=self._prep_log,
+                                        progress=progress, cancelled=self._prep_cancel.is_set)
+
+        def done(res, err):
+            self._emit("prep_ligands_done", (res, err))
+        return self._prep_thread(work, done)
 
     # ---- Vina -------------------------------------------------------------
     def _find_downloaded(self):

@@ -2,11 +2,12 @@
 
 Lattice VinaPilotX runs **AutoDock Vina** from inside UCSF ChimeraX. It takes a prepared receptor and prepared ligands (PDBQT), lets you define the search box on the structure, runs single or batch docking, and collects the results. This page explains every feature and how it works. (Working name; the tool is not yet final-named.)
 
-> Scope of this version: Vina integration only. Receptor/ligand **preparation** (Meeko) is a later step, so inputs must already be `.pdbqt` files.
+> Inputs for docking are `.pdbqt` files. The **Prepare** tab can make them from PDB/mmCIF (receptor) and SDF/MOL/MOL2/SMILES (ligands) with Meeko.
 
 ## Highlights
 
-- One window, five tabs: **Settings → Inputs → Box → Run → Results**.
+- One window, six tabs: **Settings → Prepare → Inputs → Box → Run → Results**.
+- **Meeko preparation** in a private environment (micromamba, with a venv + pip fallback) set up from the Settings tab; receptor cleaning is done in ChimeraX.
 - Finds your Vina, or **downloads the official Vina** for your OS/CPU and verifies it.
 - Receptor opens in the scene when selected; other models are hidden to avoid clashes.
 - **Ligand table** with size and chemistry info per ligand; the **largest ligand is highlighted**; export to CSV.
@@ -45,7 +46,34 @@ Multi-pose Vina output then opens in ViewDock and single structures open as ordi
 
 ---
 
-## 2. Inputs tab
+### Preparation environment (Meeko)
+Meeko and RDKit are installed in a private environment, never into ChimeraX. Every Meeko command runs as a separate process.
+
+- **Set up Meeko** with *Automatic*: downloads the official **micromamba** program (GitHub releases, then micro.mamba.pm), creates a conda-forge environment (`python 3.11, meeko, rdkit, scipy, numpy, gemmi, prody`) and checks it. If that fails, it falls back to a **venv + pip** environment (system Python first, then the Python shipped with ChimeraX; ProDy is optional there). You can also force one of the two methods.
+- **Use existing Python…** uses a Python that already has Meeko and RDKit (a conda or venv Python; nothing is installed).
+- **Verify** re-checks the environment (Meeko version, RDKit, ProDy). **Remove** deletes an environment this tool created.
+- The environment lives in ChimeraX's user-data folder under `VinaPilotX/prep/` and is remembered between sessions. Progress and pip/micromamba output are shown in the log box.
+- Meeko's command-line options changed between versions, so the tool reads `--help` of the installed Meeko and adapts (e.g. `--read_with_prody` / `--read_pdb` / `-i`, `--delete_bad_res` / `--allow_bad_res`).
+
+---
+
+## 2. Prepare tab (receptor and ligands)
+
+### Receptor (PDB / mmCIF → PDBQT)
+1. Pick a file, or an already open model (a copy is used; your model is not changed).
+2. **Cleaning in ChimeraX**: keep only chosen chains; remove water (`solvent`), ions/metals (`ions`), and other ligands/cofactors (everything that is not protein or nucleic acid); **add hydrogens** with `addh … hbond true`. The cleaned file is saved as `prepared/receptor/<name>_clean.pdb`.
+3. **Meeko**: `mk_prepare_receptor -o <name> -p` writes `prepared/receptor/<name>.pdbqt`. *Skip residues Meeko cannot handle* drops residues without a template (with a warning in the log) instead of stopping.
+4. The result is placed in the receptor field of the Inputs tab and shown in the scene.
+
+### Ligands (SDF / MOL / MOL2 / SMILES → PDBQT)
+1. Add files or folders (sub-folders included). `.smi` files are lines of `SMILES name`.
+2. **RDKit staging**: molecules without hydrogens, or with flat 2D coordinates, get hydrogens and a 3D conformer (ETKDG + MMFF); molecules that already have 3D coordinates and hydrogens are used as they are. Protonation states are **not** changed. Names come from the SDF title/`_Name` or the file name; duplicate names get `_2`, `_3` …; unreadable molecules are listed as skipped.
+3. **Meeko**: `mk_prepare_ligand` writes one PDBQT per molecule to `prepared/ligands/` (Gasteiger charges, Meeko's defaults).
+4. The PDBQT files are added to the Inputs tab automatically.
+
+---
+
+## 3. Inputs tab
 
 ### Receptor
 Select a prepared receptor `.pdbqt`. It is checked and then opened in the scene:
@@ -79,7 +107,7 @@ Add files, add a folder (optionally with sub-folders), or add library files that
 
 ---
 
-## 3. Box tab
+## 4. Box tab
 
 The search space is Vina's `center_x/y/z` and `size_x/y/z` in Å. Center and size are two columns (X, Y, Z rows); if the panel is too narrow it scrolls sideways.
 
@@ -98,7 +126,7 @@ The box editor is derived from the standalone ChimeraX Vina Grid Box bundle (sam
 
 ---
 
-## 4. Run tab
+## 5. Run tab
 
 ### Settings
 | Setting | Default | Notes |
@@ -133,7 +161,7 @@ If a ligand already has a result and a log in the working folder, it is reused (
 
 ---
 
-## 5. Results tab
+## 6. Results tab
 
 - **Expandable tree.** One row per ligand (best affinity, number of poses, seed, status, best rating). Expand it to list every pose: affinity, RMSD l.b., RMSD u.b., rating, H-bonds, clashes. Poses stay in pose order when you sort; ligand rows sort by any column.
 - **Instant display.** A ligand's whole Vina output (all poses) is opened once as one model, so its poses appear as sub-models (e.g. #3.1, #3.2 …). Selecting a pose shows that sub-model and hides the others, so clicking through poses is instant. At most *Max ligand files kept open* (default 5) stay loaded; opening another closes the least recently used one. The receptor is opened once and reused.
@@ -147,9 +175,11 @@ If a ligand already has a result and a log in the working folder, it is reused (
 
 ---
 
-## 6. Files written to the working directory
+## 7. Files written to the working directory
 
 ```
+prepared/receptor/         cleaned PDB and Meeko receptor PDBQT (Prepare tab)
+prepared/ligands/          Meeko ligand PDBQT files; prepared/staging/ holds the RDKit SDFs
 receptor/<name>.pdbqt      copy of the receptor used
 ligands/<name>.pdbqt       one file per ligand (libraries split)
 results/<name>_out.pdbqt   Vina poses (REMARK VINA RESULT lines give the affinities)
@@ -169,7 +199,7 @@ manifest.json              tool/Vina versions, receptor, box, parameters, seed p
 ---
 
 ## Known limits
-- Inputs must already be PDBQT; preparation is planned.
+- Docking inputs must be PDBQT; the Prepare tab creates them. Ligand protonation states are not assigned; flexible/covalent receptor options of Meeko are not exposed yet.
 - Resume does not detect changed receptor/box/parameters.
 - Ligand dimensions describe the stored conformation only.
 - Progress-bar smoothness depends on Vina's output buffering.

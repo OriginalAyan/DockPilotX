@@ -67,7 +67,7 @@ def _by_spec(sess, spec):
             if k.id == ids: return k
 def _run(sess, text):
     ran.append(text)
-    if text.startswith("open ") and "format pdbqt" in text:
+    if text.startswith("open ") and ("format pdbqt" in text or ".pdb\"" in text):
         _ids[0] += 1
         if "_out.pdbqt" in text:
             sess.tools.items.append(ViewDockTool())
@@ -241,7 +241,7 @@ assert "Time" not in [T.headerItem().text(c) for c in range(T.columnCount())]
 seeds = [int(T.topLevelItem(r).text(8)) for r in range(3)]; assert len(set(seeds)) == 3   # read from Vina's output
 assert "3 / 3" in tool.counter_label.text()
 assert all(s[1].value() == 100 for s in tool._slots), [s[1].value() for s in tool._slots]
-assert tool.tabs.currentIndex() == 4 and tool.run_btn.isEnabled() and not tool.cancel_btn.isEnabled()
+assert tool.tabs.currentIndex() == 5 and tool.run_btn.isEnabled() and not tool.cancel_btn.isEnabled()
 W = os.path.join(tmp, "work")
 rows_ = list(__import__("csv").DictReader(open(os.path.join(W, "summary.csv"))))
 assert len(rows_) >= 3 and {"pose", "rmsd_lb", "rmsd_ub", "rating"} <= set(rows_[0]) and "time" not in "".join(rows_[0]).lower()
@@ -320,6 +320,21 @@ cfg = open(os.path.join(tmp, "work", "vina_config.txt")).read(); assert "exhaust
 tool._reset_defaults(); assert tool.exh_spin.value() == 8 and tool.parallel_spin.value() == 1 and tool.seed_spin.value() == 0
 assert "#1e88e5" in tool.tool_window.ui_area.styleSheet()
 # min-size: no page may force a tall window
+# Prepare tab: UI state, receptor cleaning commands, hand-off of results to the Inputs tab
+P = tool.prepare
+assert tool.tabs.tabText(1) == "2 Prepare" and not P.rec_btn.isEnabled() and "not set up" in P.env_label.text().lower()
+tool.controller.prep_ok, tool.controller.prep_message = True, "Meeko 0.8.0 ready"; P.refresh_env(); assert P.rec_btn.isEnabled() and not P.goto_btn.isVisible()
+from chimerax.vinapilotx.receptor_clean import clean_receptor
+src = os.path.join(tmp, "prot.pdb"); open(src, "w").write("ATOM\n")
+n_ran = len(ran); outp = os.path.join(tmp, "clean.pdb")
+msg = clean_receptor(session, src, outp, chains="A, B", remove_water=True, remove_ions=True, remove_ligands=True, add_h=True)
+cmds = ran[n_ran:]
+assert any(c.startswith("open ") for c in cmds) and any("& ~/A,B" in c for c in cmds) and any("& solvent" in c for c in cmds)
+assert any(c.startswith("addh") and "hbond true" in c for c in cmds) and any(c.startswith("save") and "clean.pdb" in c for c in cmds), cmds
+assert not [m for m in session.models.list() if m is not other and "prot.pdb" in m.name], "temporary model must be closed"
+P.receptor_done(((rec, ["A:7"]), None)); assert tool.receptor_edit.text() == rec and "Skipped 1 residue(s): A:7" in P.rec_result.text()
+P.receptor_done((None, "boom")); assert "boom" in P.rec_result.text()
+P.ligands_done(({"files": [], "failed": [("x", "bad")], "n_inputs": 1}, None)); assert "No ligands" in P.lig_result.text()
 print("tab min heights:", [tool.tabs.widget(i).minimumSizeHint().height() for i in range(tool.tabs.count())])
 assert max(tool.tabs.widget(i).minimumSizeHint().height() for i in range(tool.tabs.count())) < 300
 tool.controller.vina_exe = None

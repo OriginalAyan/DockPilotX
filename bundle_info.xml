@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- VinaPilotX source bundle. Build with ChimeraX's "devel build" command. -->
-<BundleInfo name="ChimeraX-VinaPilotX" version="0.5.1" package="chimerax.vinapilotx"
+<BundleInfo name="ChimeraX-VinaPilotX" version="0.6.0" package="chimerax.vinapilotx"
             minSessionVersion="1" maxSessionVersion="1" customInit="true">
   <Author>Ayan Bhowmik</Author>
   <Email>ayan.bhowmik.bd@gmail.com</Email>

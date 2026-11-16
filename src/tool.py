@@ -1,4 +1,4 @@
-"""The Lattice VinaPilotX tool window: Settings, Inputs, Box, Run and Results tabs."""
+"""The Lattice VinaPilotX tool window: Settings, Prepare, Inputs, Box, Run and Results tabs."""
 
 import csv
 import os
@@ -95,6 +95,8 @@ class VinaPilotXTool(ToolInstance):
         self._restore_settings()
         self.controller.add_listener(self._on_event)
         self._refresh_vina_status()
+        if self.controller.prep_env is not None and not self.controller.prep_message:
+            self.controller.verify_prep()
         self.tool_window.manage(placement="side")
 
     # ------------------------------------------------------------------ UI
@@ -107,11 +109,14 @@ class VinaPilotXTool(ToolInstance):
         self.tabs = QTabWidget()
         outer.addWidget(self.tabs)
         self.tabs.addTab(_scrolled(self._build_settings_tab()), "1 Settings")
-        self.tabs.addTab(_scrolled(self._build_inputs_tab()), "2 Inputs")
+        from .prepare_tab import PrepareTab
+        self.prepare = PrepareTab(self.session, self.controller, self)
+        self.tabs.addTab(_scrolled(self.prepare), "2 Prepare")
+        self.tabs.addTab(_scrolled(self._build_inputs_tab()), "3 Inputs")
         self.box_panel = BoxPanel(self.session)
-        self.tabs.addTab(self.box_panel, "3 Box")
-        self.tabs.addTab(_scrolled(self._build_run_tab()), "4 Run")
-        self.tabs.addTab(_scrolled(self._build_results_tab()), "5 Results")
+        self.tabs.addTab(self.box_panel, "4 Box")
+        self.tabs.addTab(_scrolled(self._build_run_tab()), "5 Run")
+        self.tabs.addTab(_scrolled(self._build_results_tab()), "6 Results")
         self.tabs.currentChanged.connect(self._tab_changed)
 
     # ---- Settings ----------------------------------------------------
@@ -169,6 +174,47 @@ class VinaPilotXTool(ToolInstance):
         gl.addWidget(n)
         lay.addWidget(g)
 
+        g = QGroupBox("Preparation environment (Meeko)")
+        gl = QVBoxLayout(g)
+        self.env_status = QLabel("")
+        self.env_status.setWordWrap(True)
+        gl.addWidget(self.env_status)
+        self.env_method = QComboBox()
+        self.env_method.addItem("Automatic (micromamba, then venv)", "auto")
+        self.env_method.addItem("micromamba (conda-forge)", "micromamba")
+        self.env_method.addItem("venv + pip (fallback)", "venv")
+        self.env_method.setToolTip("Meeko and RDKit are installed in a private environment, not into ChimeraX.")
+        gl.addWidget(self.env_method)
+        row = QHBoxLayout()
+        self.env_setup_btn = QPushButton("Set up Meeko")
+        self.env_setup_btn.clicked.connect(lambda: self.controller.setup_prep_env(self.env_method.currentData()))
+        self.env_cancel_btn = QPushButton("Cancel")
+        self.env_cancel_btn.clicked.connect(self.controller.cancel_prep)
+        self.env_cancel_btn.setVisible(False)
+        self.env_existing_btn = QPushButton("Use existing Python…")
+        self.env_existing_btn.setToolTip("A Python (or environment folder) that already has Meeko and RDKit.")
+        self.env_existing_btn.clicked.connect(self._use_existing_python)
+        self.env_verify_btn = QPushButton("Verify")
+        self.env_verify_btn.clicked.connect(self.controller.verify_prep)
+        self.env_remove_btn = QPushButton("Remove")
+        self.env_remove_btn.clicked.connect(self._remove_env)
+        for b in (self.env_setup_btn, self.env_cancel_btn, self.env_existing_btn, self.env_verify_btn,
+                  self.env_remove_btn):
+            row.addWidget(b)
+        row.addStretch(1)
+        gl.addLayout(row)
+        self.env_bar = QProgressBar()
+        self.env_bar.setRange(0, 0)
+        self.env_bar.setVisible(False)
+        gl.addWidget(self.env_bar)
+        self.env_log = QPlainTextEdit()
+        self.env_log.setReadOnly(True)
+        self.env_log.setMaximumBlockCount(1000)
+        self.env_log.setMinimumHeight(90)
+        gl.addWidget(self.env_log)
+        lay.addWidget(g)
+        self._refresh_env_status()
+
         from .pose_viewer import DEFAULT_COLORS
         g = QGroupBox("Interaction colours")
         gl = QVBoxLayout(g)
@@ -196,6 +242,33 @@ class VinaPilotXTool(ToolInstance):
         lay.addWidget(g)
         lay.addStretch(1)
         return w
+
+    def _refresh_env_status(self):
+        c = self.controller
+        if c.prep_ok:
+            self.env_status.setText("✔ " + c.prep_message if c.prep_message else "✔ Meeko environment ready.")
+            self.env_status.setStyleSheet(OK_STYLE)
+        else:
+            self.env_status.setText("✘ " + (c.prep_message or "Not set up. Meeko prepares receptors and ligands."))
+            self.env_status.setStyleSheet(BAD_STYLE)
+
+    def _prep_busy_changed(self, busy):
+        self.env_bar.setVisible(busy)
+        self.env_cancel_btn.setVisible(busy)
+        for b in (self.env_setup_btn, self.env_existing_btn, self.env_verify_btn, self.env_remove_btn):
+            b.setEnabled(not busy)
+        self.prepare.set_busy(busy)
+
+    def _use_existing_python(self):
+        p, _ = QFileDialog.getOpenFileName(self.tool_window.ui_area, "Select python (or python.exe)", "",
+                                           "All files (*)")
+        if p:
+            self.controller.use_external_python(p)
+
+    def _remove_env(self):
+        if QMessageBox.question(self.tool_window.ui_area, "Remove environment",
+                                "Remove the Meeko environment that Lattice VinaPilotX created?") == QMessageBox.StandardButton.Yes:
+            self.controller.remove_prep_env()
 
     def _paint_color_buttons(self):
         for k, btn in self._color_btns.items():
@@ -649,7 +722,7 @@ class VinaPilotXTool(ToolInstance):
         if box is None:
             QMessageBox.warning(self.tool_window.ui_area, "Lattice VinaPilotX",
                                 "There is no search box yet. Create one on the Box tab first.")
-            self.tabs.setCurrentIndex(2)
+            self.tabs.setCurrentIndex(3)
             return
         center, size = box
         receptor = self.receptor_edit.text().strip().strip('"')
@@ -663,7 +736,7 @@ class VinaPilotXTool(ToolInstance):
             return
         self._save_settings()
         self.activity.clear()
-        self.tabs.setCurrentIndex(3)
+        self.tabs.setCurrentIndex(4)
 
     def _open_workdir(self):
         d = self.workdir_edit.text().strip()
@@ -682,8 +755,10 @@ class VinaPilotXTool(ToolInstance):
             self.box_summary.setStyleSheet("")
 
     def _tab_changed(self, index):
-        if index == 3:
+        if index == 4:
             self._update_box_summary()
+        elif index == 1:
+            self.prepare.refresh_models()
 
     # per-ligand progress bars ("slots")
     def _make_slots(self, n):
@@ -812,10 +887,24 @@ class VinaPilotXTool(ToolInstance):
             self.counter_label.setText("Ligands completed: %d / %d" % (done, total))
         elif event == "log":
             self.activity.appendPlainText(str(payload))
+        elif event == "prep_log":
+            self.prepare.log_line(payload)
+            self.env_log.appendPlainText(str(payload))
+        elif event == "prep_busy":
+            self._prep_busy_changed(bool(payload))
+        elif event == "prep_env":
+            self.prepare.refresh_env()
+            self._refresh_env_status()
+        elif event == "prep_progress":
+            self.prepare.progress(payload)
+        elif event == "prep_receptor_done":
+            self.prepare.receptor_done(payload)
+        elif event == "prep_ligands_done":
+            self.prepare.ligands_done(payload)
         elif event == "finished":
             self.run_status.setText("Finished. Results are in %s" % payload.workdir)
             self.results.sort_by_best()
-            self.tabs.setCurrentIndex(4)
+            self.tabs.setCurrentIndex(5)
             self.run_btn.setEnabled(True); self.cancel_btn.setEnabled(False)
 
     # ------------------------------------------------------------ plumbing

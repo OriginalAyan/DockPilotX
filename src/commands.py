@@ -23,10 +23,10 @@ def _tool(session, show=True):
 def cmd_gui(session, tab=None):
     tool = _tool(session)
     if tab is not None:
-        tool.show_tab(["settings", "inputs", "box", "run", "results"].index(tab))
+        tool.show_tab(["settings", "prepare", "inputs", "box", "run", "results"].index(tab))
 
 
-gui_desc = CmdDesc(optional=[("tab", EnumOf(["settings", "inputs", "box", "run", "results"]))],
+gui_desc = CmdDesc(optional=[("tab", EnumOf(["settings", "prepare", "inputs", "box", "run", "results"]))],
                    synopsis="open the Lattice VinaPilotX window")
 
 

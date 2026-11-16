@@ -3,10 +3,11 @@
 <p>Dock ligands with AutoDock Vina from ChimeraX. Open it from <b>Tools &rarr; Binding Analysis &rarr; Lattice VinaPilotX</b> or with <code>vinax gui</code>.</p>
 <ol>
 <li><b>Settings</b> &ndash; browse to <code>vina</code>/<code>vina.exe</code> (or its folder) or press <i>Download latest Vina</i>; choose the working directory; switch the native <code>.pdbqt</code> opening override on/off.</li>
+<li><b>Prepare</b> &ndash; cleans a PDB/mmCIF receptor in ChimeraX (chains, water, ions, ligands, hydrogens) and converts it, and ligands (SDF, MOL, MOL2, SMILES), to PDBQT with Meeko. Meeko is set up from the Settings tab in a private environment (micromamba, with a venv + pip fallback).</li>
 <li><b>Inputs</b> &ndash; the receptor opens in the scene when you select it (other models are hidden); ligands appear in a table with heavy atoms, torsions, dimensions (principal-axis extents), longest distance, charge, acceptors/polar H, folder and file. The largest ligand is highlighted to help size the box.</li>
 <li><b>Box</b> &ndash; type center/size, build it from the selection, or drag it with the mouse.</li>
 <li><b>Run</b> &ndash; set exhaustiveness etc. and press <i>Run docking</i>. Interrupted batches resume; finished ligands are not re-docked unless you tick the re-dock option.</li>
-<li><b>Results</b> &ndash; sortable table; double-click to open poses (ViewDock). Export to CSV.</li>
+<li><b>Results</b> &ndash; expandable ligand/pose tree with ratings, per-pose H-bonds and clashes; click a pose to show it. Export to CSV.</li>
 </ol>
 <h3>Working-directory layout</h3>
 <pre>receptor/  ligands/  results/  logs/  vina_config.txt  summary.csv  manifest.json</pre>
