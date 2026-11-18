@@ -58,31 +58,101 @@ def receptor_args(help_text, info, clean_pdb, out_base, delete_bad=True):
     return args
 
 
-def prepare_receptor(env, info, clean_pdb, out_base, delete_bad=True, log=None, cancelled=None):
-    """Run mk_prepare_receptor on a cleaned PDB. Returns (path of the written .pdbqt, [keys of residues Meeko skipped, e.g. 'A:7'])."""
-    help_text = tool_help(env, info, "mk_prepare_receptor")
-    cmd = tool_argv(env, info, "mk_prepare_receptor") + receptor_args(help_text, info, clean_pdb, out_base, delete_bad)
-    if log:
-        log("mk_prepare_receptor: " + " ".join(_quote(c) for c in cmd[-8:]))
-    os.makedirs(os.path.dirname(out_base) or ".", exist_ok=True)
-    for old in glob.glob(out_base + "*.pdbqt"):
+def _res_key(line):
+    """'A:1170' style key of a PDB ATOM/HETATM line (insertion code appended when present)."""
+    return "%s:%s%s" % (line[21].strip(), line[22:26].strip(), line[26].strip())
+
+
+def residue_atoms(pdb_path, keys):
+    """{key: [atom names]} for the residues *keys* of a PDB file (for diagnostics)."""
+    out = {k: [] for k in keys}
+    try:
+        with open(pdb_path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if line.startswith(("ATOM", "HETATM")) and len(line) > 27:
+                    k = _res_key(line)
+                    if k in out:
+                        out[k].append(line[12:16].strip())
+    except OSError:
+        pass
+    return out
+
+
+def strip_hydrogens(pdb_in, pdb_out, keys):
+    """Copy a PDB file, dropping the hydrogens of the residues *keys*. Returns the number removed."""
+    keys, removed = set(keys), 0
+    with open(pdb_in, encoding="utf-8", errors="replace") as f, open(pdb_out, "w", encoding="utf-8") as g:
+        for line in f:
+            if line.startswith(("ATOM", "HETATM")) and len(line) > 27 and _res_key(line) in keys:
+                elem = line[76:78].strip() if len(line) >= 78 else ""
+                name = line[12:16].strip()
+                if elem == "H" or (not elem and name.startswith("H")):
+                    removed += 1
+                    continue
+            g.write(line)
+    return removed
+
+
+def _run_receptor(env, info, help_text, pdb, base, delete_bad, log, cancelled):
+    cmd = tool_argv(env, info, "mk_prepare_receptor") + receptor_args(help_text, info, pdb, base, delete_bad)
+    for old in glob.glob(base + "*.pdbqt"):
         os.remove(old)
-    warnings = []
+    skipped = []
 
     def on_line(line):
         if "Template matching failed for" in line:
-            warnings.extend(re.findall(r"'([^']+)'", line.split("for:", 1)[-1]))
+            skipped.extend(re.findall(r"'([^']+)'", line.split("for:", 1)[-1]))
         if log:
             log(line)
 
-    code = run_stream(cmd, on_line, cancelled, cwd=os.path.dirname(out_base) or None, env=env.environ())
+    code = run_stream(cmd, on_line, cancelled, cwd=os.path.dirname(base) or None, env=env.environ())
     if code == -1:
         raise PrepError("Cancelled.")
-    produced = sorted(glob.glob(out_base + "*.pdbqt"))
-    exact = out_base + ".pdbqt"
+    produced = sorted(glob.glob(base + "*.pdbqt"))
     if code != 0 or not produced:
         raise PrepError("mk_prepare_receptor failed (exit code %d). See the log above." % code)
-    return (exact if exact in produced else produced[0]), warnings
+    exact = base + ".pdbqt"
+    return (exact if exact in produced else produced[0]), skipped, cmd
+
+
+def prepare_receptor(env, info, clean_pdb, out_base, delete_bad=True, log=None, cancelled=None, rescue=True):
+    """Run mk_prepare_receptor on a cleaned PDB. Returns (path of the .pdbqt, [skipped residue keys], [rescued keys]).
+
+    Residues Meeko cannot match are dropped (*delete_bad*). With *rescue*, such residues get a second try
+    without their hydrogens (Meeko then adds standard ones from its templates), which fixes residues whose
+    added hydrogens do not fit any template.
+    """
+    help_text = tool_help(env, info, "mk_prepare_receptor")
+    os.makedirs(os.path.dirname(out_base) or ".", exist_ok=True)
+    path, skipped, cmd = _run_receptor(env, info, help_text, clean_pdb, out_base, delete_bad, log, cancelled)
+    if log:
+        log("mk_prepare_receptor: " + " ".join(_quote(c) for c in cmd[-8:]))
+    rescued = []
+    if skipped and rescue:
+        if log:
+            for k, names in residue_atoms(clean_pdb, skipped).items():
+                log("Residue %s did not match a Meeko template; its atoms: %s" % (k, " ".join(names)))
+            log("Retrying %d residue(s) without their hydrogens ..." % len(skipped))
+        retry_pdb = out_base + "_retry.pdb"
+        strip_hydrogens(clean_pdb, retry_pdb, skipped)
+        retry_base = out_base + "_retry"
+        try:
+            path2, skipped2, _ = _run_receptor(env, info, help_text, retry_pdb, retry_base, delete_bad, log, cancelled)
+        except PrepError as err:
+            if str(err) == "Cancelled.":
+                raise
+            path2, skipped2 = None, skipped
+        if path2 is not None and len(skipped2) < len(skipped):
+            os.replace(path2, out_base + ".pdbqt")
+            path = out_base + ".pdbqt"
+            rescued = [k for k in skipped if k not in skipped2]
+            skipped = skipped2
+        for f in glob.glob(retry_base + "*") + [retry_pdb]:
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+    return path, skipped, rescued
 
 
 def _quote(s):

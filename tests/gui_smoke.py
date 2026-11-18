@@ -322,17 +322,30 @@ assert "#1e88e5" in tool.tool_window.ui_area.styleSheet()
 # min-size: no page may force a tall window
 # Prepare tab: UI state, receptor cleaning commands, hand-off of results to the Inputs tab
 P = tool.prepare
-assert tool.tabs.tabText(1) == "2 Prepare" and not P.rec_btn.isEnabled() and "not set up" in P.env_label.text().lower()
-tool.controller.prep_ok, tool.controller.prep_message = True, "Meeko 0.8.0 ready"; P.refresh_env(); assert P.rec_btn.isEnabled() and not P.goto_btn.isVisible()
-from chimerax.vinapilotx.receptor_clean import clean_receptor
+assert tool.tabs.tabText(1) == "2 Prepare" and not P.conv_btn.isEnabled() and "not set up" in P.env_label.text().lower()
+tool.controller.prep_ok, tool.controller.prep_message = True, "Meeko 0.8.0 ready"; P.refresh_env(); assert P.conv_btn.isEnabled() and not P.goto_btn.isVisible()
+from chimerax.vinapilotx.receptor_clean import clean_receptor, minimize_model, save_model_pdb, HYDROGEN_CHOICES
 src = os.path.join(tmp, "prot.pdb"); open(src, "w").write("ATOM\n")
-n_ran = len(ran); outp = os.path.join(tmp, "clean.pdb")
-msg = clean_receptor(session, src, outp, chains="A, B", remove_water=True, remove_ions=True, remove_ligands=True, add_h=True)
-cmds = ran[n_ran:]
-assert any(c.startswith("open ") for c in cmds) and any("& ~/A,B" in c for c in cmds) and any("& solvent" in c for c in cmds)
-assert any(c.startswith("addh") and "hbond true" in c for c in cmds) and any(c.startswith("save") and "clean.pdb" in c for c in cmds), cmds
-assert not [m for m in session.models.list() if m is not other and "prot.pdb" in m.name], "temporary model must be closed"
-P.receptor_done(((rec, ["A:7"]), None)); assert tool.receptor_edit.text() == rec and "Skipped 1 residue(s): A:7" in P.rec_result.text()
+def run_clean(**kw):
+    n = len(ran); m, msg = clean_receptor(session, src, "prot", chains="A, B", **kw); return m, msg, ran[n:]
+m, msg, cmds = run_clean(hydrogens="auto")
+assert m.name == "prot_prep" and not m.deleted, "the cleaned copy must stay in the scene"
+assert any(c.startswith("open ") for c in cmds) and any("& ~/A,B" in c for c in cmds) and any("~(protein|nucleic|solvent|ions)" in c for c in cmds)
+dp = [c for c in cmds if c.startswith("dockprep")][0]
+assert "delSolvent true" in dp and "delAltLocs true" in dp and "ah true" in dp and "ac false" in dp and "completeSideChains Dunbrack" in dp, dp
+assert "hydrogens added" in msg
+m2, msg2, cmds2 = run_clean(hydrogens="never", side_chains="none", del_water=False)
+dp2 = [c for c in cmds2 if c.startswith("dockprep")][0]
+assert "ah false" in dp2 and "delSolvent false" in dp2 and "completeSideChains false" in dp2, dp2
+m.atoms.element_names = ["H"] * 3 + ["C"] * 5      # structure that already has hydrogens
+assert clean_receptor.__defaults__ is None
+import chimerax.vinapilotx.receptor_clean as rc
+assert rc.count_hydrogens(m) == 3
+n = len(ran); minimize_model(session, m, 50, False); minimize_model(session, m, 50, True)
+assert "minimize #%s dockPrep false maxSteps 50" % ".".join(str(i) for i in m.id) in ran[n] and "maxSteps 0" in ran[n + 1]
+save_model_pdb(session, m, os.path.join(tmp, "x.pdb")); assert any(c.startswith("save ") and "x.pdb" in c for c in ran)
+session.models.close([m, m2])
+P.receptor_done((((rec, ["A:7"], ["A:9"]), None))); assert tool.receptor_edit.text() == rec and "Skipped 1 residue(s): A:7" in P.rec_result.text() and "A:9" in P.rec_result.text()
 P.receptor_done((None, "boom")); assert "boom" in P.rec_result.text()
 P.ligands_done(({"files": [], "failed": [("x", "bad")], "n_inputs": 1}, None)); assert "No ligands" in P.lig_result.text()
 print("tab min heights:", [tool.tabs.widget(i).minimumSizeHint().height() for i in range(tool.tabs.count())])

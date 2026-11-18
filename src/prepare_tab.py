@@ -6,10 +6,11 @@ import tempfile
 
 from Qt.QtWidgets import (
     QCheckBox, QComboBox, QFileDialog, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QPlainTextEdit,
-    QProgressBar, QPushButton, QVBoxLayout, QWidget,
+    QProgressBar, QPushButton, QSpinBox, QVBoxLayout, QWidget,
 )
 
 from . import prep
+from .receptor_clean import HYDROGEN_CHOICES, SIDE_CHAIN_CHOICES
 from .pdbqt_tools import safe_name
 
 OK_STYLE = "color: #2e7d32; font-weight: bold;"
@@ -24,6 +25,9 @@ class PrepareTab(QWidget):
         self.controller = controller
         self.host = host          # the tool: workdir_edit, receptor_edit, _receptor_chosen, _add_ligand_paths, show_tab
         self._model_ids = []
+        self._prep_model = None       # the cleaned copy in the scene
+        self._prep_name = None
+        self._prep_source = None
         self._build_ui()
         self.refresh_env()
 
@@ -57,19 +61,63 @@ class PrepareTab(QWidget):
         self.chains_edit = QLineEdit()
         self.chains_edit.setPlaceholderText("Keep only chains, e.g. A,B (blank = all)")
         gl.addWidget(self.chains_edit)
-        self.water_cb = QCheckBox("Remove water")
-        self.ions_cb = QCheckBox("Remove ions / metals")
-        self.lig_cb = QCheckBox("Remove ligands / cofactors")
-        self.addh_cb = QCheckBox("Add hydrogens (ChimeraX)")
-        self.bad_cb = QCheckBox("Skip residues Meeko cannot handle")
-        self.addh_cb.setToolTip("Meeko needs hydrogens on the receptor.")
-        self.bad_cb.setToolTip("Residues without a matching template are dropped, with a warning, instead of stopping.")
-        for cb in (self.water_cb, self.ions_cb, self.lig_cb, self.addh_cb, self.bad_cb):
+        tips = {
+            "water": "Delete water molecules.",
+            "ions": "Delete ions and metals. Keep them only if Meeko supports them.",
+            "ligands": "Delete ligands, cofactors and other non-polymer groups.",
+            "altlocs": "Keep only the alternate location in use (highest occupancy).",
+        }
+        self.water_cb = QCheckBox("Delete water")
+        self.ions_cb = QCheckBox("Delete ions / metals")
+        self.lig_cb = QCheckBox("Delete other ligands / cofactors")
+        self.alt_cb = QCheckBox("Delete alternate locations")
+        for cb, key in ((self.water_cb, "water"), (self.ions_cb, "ions"), (self.lig_cb, "ligands"), (self.alt_cb, "altlocs")):
             cb.setChecked(True)
+            cb.setToolTip(tips[key])
             gl.addWidget(cb)
-        self.rec_btn = QPushButton("Prepare receptor")
-        self.rec_btn.clicked.connect(self._prepare_receptor)
+        gl.addWidget(QLabel("Incomplete side chains"))
+        self.sc_combo = QComboBox()
+        for label, value in SIDE_CHAIN_CHOICES:
+            self.sc_combo.addItem(label, value)
+        self.sc_combo.setToolTip("Missing side-chain atoms are rebuilt from a rotamer library (as in Dock Prep).")
+        gl.addWidget(self.sc_combo)
+        gl.addWidget(QLabel("Hydrogens"))
+        self.h_combo = QComboBox()
+        for label, value in HYDROGEN_CHOICES:
+            self.h_combo.addItem(label, value)
+        self.h_combo.setToolTip(
+            "Add if missing: hydrogens are added only when the structure has none. Existing hydrogens and\n"
+            "histidine names (HID/HIE/HIP) are kept, so protonation you set earlier is not changed.\n"
+            "Don't add: Meeko adds standard hydrogens itself (default histidine state).")
+        gl.addWidget(self.h_combo)
+        self.bad_cb = QCheckBox("Skip residues Meeko cannot handle")
+        self.bad_cb.setToolTip("Residues without a matching template are dropped, with a warning, instead of stopping.")
+        self.bad_cb.setChecked(True)
+        gl.addWidget(self.bad_cb)
+        self.rec_btn = QPushButton("1. Clean receptor")
+        self.rec_btn.setToolTip("Runs Dock Prep on a copy and keeps it in the scene as <name>_prep.")
+        self.rec_btn.clicked.connect(self._clean_receptor)
         gl.addWidget(self.rec_btn)
+        row = QHBoxLayout()
+        self.min_btn = QPushButton("2. Minimize (optional)")
+        self.min_btn.setToolTip("ChimeraX energy minimization of the cleaned copy. Moves all atoms. "
+                                "Runs in the background; wait for it to finish in the Log.")
+        self.min_btn.clicked.connect(self._minimize)
+        row.addWidget(self.min_btn)
+        self.min_steps = QSpinBox()
+        self.min_steps.setRange(1, 100000)
+        self.min_steps.setValue(100)
+        self.min_steps.setSuffix(" steps")
+        row.addWidget(self.min_steps)
+        self.min_conv = QCheckBox("until convergence")
+        self.min_conv.setToolTip("Not recommended: can take very long for a whole protein.")
+        row.addWidget(self.min_conv)
+        gl.addLayout(row)
+        self.conv_btn = QPushButton("3. Convert with Meeko")
+        self.conv_btn.setToolTip("Saves the current <name>_prep model and converts it to PDBQT. "
+                                 "If step 1 was not run, it is run first.")
+        self.conv_btn.clicked.connect(self._convert_receptor)
+        gl.addWidget(self.conv_btn)
         self.rec_result = QLabel("")
         self.rec_result.setWordWrap(True)
         gl.addWidget(self.rec_result)
@@ -134,8 +182,10 @@ class PrepareTab(QWidget):
 
     def set_busy(self, busy):
         ok = self.controller.prep_ok and not busy
-        for b in (self.rec_btn, self.lig_btn):
+        for b in (self.conv_btn, self.lig_btn):
             b.setEnabled(ok)
+        self.rec_btn.setEnabled(not busy)
+        self.min_btn.setEnabled(not busy)
         self.cancel_btn.setVisible(busy)
         self.bar.setVisible(busy)
         if busy:
@@ -161,10 +211,9 @@ class PrepareTab(QWidget):
     def _workdir(self):
         w = self.host.workdir_edit.text().strip().strip('"')
         if not w:
-            self.rec_result.setText("Choose a working directory on the Settings tab first.")
-            self.rec_result.setStyleSheet(BAD_STYLE)
-            self.lig_result.setText("Choose a working directory on the Settings tab first.")
-            self.lig_result.setStyleSheet(BAD_STYLE)
+            for lab in (self.rec_result, self.lig_result):
+                lab.setText("Choose a working directory on the Settings tab first.")
+                lab.setStyleSheet(BAD_STYLE)
             return None
         return os.path.abspath(w)
 
@@ -175,55 +224,112 @@ class PrepareTab(QWidget):
             self.rec_edit.setText(p)
             self.model_combo.setCurrentIndex(0)
 
-    def _prepare_receptor(self):
+    def _source(self, out_dir):
+        """(source file, name) from the file field or the selected open model; None if neither is usable."""
+        idx = self.model_combo.currentIndex()
+        if 0 < idx < len(self._model_ids):
+            from chimerax.core.commands import run
+            m = self._model_ids[idx]
+            name = safe_name(m.name) or "receptor"
+            source = os.path.join(out_dir, name + "_source.pdb")
+            spec = "#" + ".".join(str(i) for i in m.id)
+            run(self.session, 'save "%s" %s relModel %s' % (source.replace("\\", "/"), spec, spec))
+            return source, name
+        source = self.rec_edit.text().strip().strip('"')
+        if not source or not os.path.isfile(source):
+            return None
+        return source, safe_name(os.path.splitext(os.path.basename(source))[0]) or "receptor"
+
+    def _fail(self, text):
+        self.rec_result.setText(text)
+        self.rec_result.setStyleSheet(BAD_STYLE)
+
+    def _prep_alive(self):
+        m = self._prep_model
+        return m is not None and not getattr(m, "deleted", False)
+
+    def _clean_receptor(self):
+        """Step 1: Dock Prep on a copy; the copy stays in the scene."""
         from .receptor_clean import clean_receptor
         wd = self._workdir()
         if wd is None:
-            return
+            return False
         out_dir = os.path.join(wd, "prepared", "receptor")
         os.makedirs(out_dir, exist_ok=True)
-        idx = self.model_combo.currentIndex()
-        source, name = self.rec_edit.text().strip().strip('"'), None
         try:
-            if idx > 0 and idx < len(self._model_ids):
-                from chimerax.core.commands import run
-                m = self._model_ids[idx]
-                name = safe_name(m.name) or "receptor"
-                source = os.path.join(out_dir, name + "_source.pdb")
-                spec = "#" + ".".join(str(i) for i in m.id)
-                run(self.session, 'save "%s" %s relModel %s' % (source.replace("\\", "/"), spec, spec))
-            elif not source or not os.path.isfile(source):
-                self.rec_result.setText("Choose a protein file or an open model.")
-                self.rec_result.setStyleSheet(BAD_STYLE)
-                return
-            else:
-                name = safe_name(os.path.splitext(os.path.basename(source))[0]) or "receptor"
-            clean_pdb = os.path.join(out_dir, name + "_clean.pdb")
-            summary = clean_receptor(self.session, source, clean_pdb, chains=self.chains_edit.text(),
-                                     remove_water=self.water_cb.isChecked(), remove_ions=self.ions_cb.isChecked(),
-                                     remove_ligands=self.lig_cb.isChecked(), add_h=self.addh_cb.isChecked(),
-                                     log=self.log_line)
+            src = self._source(out_dir)
+            if src is None:
+                self._fail("Choose a protein file or an open model.")
+                return False
+            source, name = src
+            if self._prep_alive():
+                self.session.models.close([self._prep_model])
+            model, summary = clean_receptor(
+                self.session, source, name, chains=self.chains_edit.text(),
+                del_water=self.water_cb.isChecked(), del_ions=self.ions_cb.isChecked(),
+                del_ligands=self.lig_cb.isChecked(), del_altlocs=self.alt_cb.isChecked(),
+                side_chains=self.sc_combo.currentData(), hydrogens=self.h_combo.currentData(), log=self.log_line)
         except Exception as err:
-            self.rec_result.setText("Cleaning failed: %s" % err)
-            self.rec_result.setStyleSheet(BAD_STYLE)
-            return
+            self._fail("Cleaning failed: %s" % err)
+            return False
+        self._prep_model, self._prep_name, self._prep_source = model, name, source
         self.log_line(summary)
-        self.rec_result.setText(summary + " Running Meeko ...")
+        self.rec_result.setText("✔ %s Step 2 (minimize) is optional; step 3 converts it." % summary)
+        self.rec_result.setStyleSheet(OK_STYLE)
+        return True
+
+    def _minimize(self):
+        from .receptor_clean import minimize_model
+        if not self._prep_alive() and not self._clean_receptor():
+            return
+        if not (self.ions_cb.isChecked() and self.lig_cb.isChecked()):
+            self.log_line("Note: ligands/ions are kept, so minimization may fail for lack of parameters.")
+        try:
+            minimize_model(self.session, self._prep_model, self.min_steps.value(), self.min_conv.isChecked())
+        except Exception as err:
+            self._fail("Minimization failed: %s" % err)
+            return
+        self.rec_result.setText("Minimization started. Watch the Log; run step 3 when it has finished.")
+        self.rec_result.setStyleSheet(WARN_STYLE)
+
+    def _convert_receptor(self):
+        """Step 3: save the cleaned copy and run Meeko."""
+        from .receptor_clean import save_model_pdb
+        wd = self._workdir()
+        if wd is None:
+            return
+        if not self._prep_alive() and not self._clean_receptor():
+            return
+        out_dir = os.path.join(wd, "prepared", "receptor")
+        clean_pdb = os.path.join(out_dir, self._prep_name + "_clean.pdb")
+        try:
+            save_model_pdb(self.session, self._prep_model, clean_pdb)
+        except Exception as err:
+            self._fail("Saving failed: %s" % err)
+            return
+        self.rec_result.setText("Running Meeko ...")
         self.rec_result.setStyleSheet("")
-        self.controller.prepare_receptor_async(clean_pdb, os.path.join(out_dir, name), self.bad_cb.isChecked())
+        self.controller.prepare_receptor_async(clean_pdb, os.path.join(out_dir, self._prep_name), self.bad_cb.isChecked())
 
     def receptor_done(self, payload):
         res, err = payload
         if err:
-            self.rec_result.setText("✘ " + err)
-            self.rec_result.setStyleSheet(BAD_STYLE)
+            self._fail("✘ " + err)
             return
-        path, warnings = res
+        path, skipped, rescued = res
         text = "✔ %s" % path
-        if warnings:
-            text += "\n⚠ Skipped %d residue(s): %s%s (see the log)." % (len(warnings), ", ".join(warnings[:8]), " …" if len(warnings) > 8 else "")
+        if rescued:
+            text += "\n✔ Kept after retrying without their hydrogens (Meeko assigned standard hydrogens): %s." % ", ".join(rescued)
+        if skipped:
+            text += ("\n⚠ Skipped %d residue(s): %s%s. Check that none lie in the binding site (see the log)."
+                     % (len(skipped), ", ".join(skipped[:8]), " …" if len(skipped) > 8 else ""))
         self.rec_result.setText(text)
-        self.rec_result.setStyleSheet(WARN_STYLE if warnings else OK_STYLE)
+        self.rec_result.setStyleSheet(WARN_STYLE if skipped else OK_STYLE)
+        if self._prep_alive():
+            try:
+                self._prep_model.display = False
+            except Exception:
+                pass
         self.host.receptor_edit.setText(path)
         self.host._receptor_chosen(open_model=True)
 

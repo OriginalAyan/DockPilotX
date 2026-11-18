@@ -86,8 +86,8 @@ w.close()
 """
     assert pe.run_stream(env.python_command(["-c", gen, str(tmp_path)])) == 0
     pdb = tmp_path / "rec.pdb"
-    path, warns = prep.prepare_receptor(env, info, str(pdb), str(tmp_path / "out" / "rec"), True)
-    assert path.endswith("rec.pdbqt") and os.path.getsize(path) > 100 and warns == ["A:7"]
+    path, warns, rescued = prep.prepare_receptor(env, info, str(pdb), str(tmp_path / "out" / "rec"), True)
+    assert path.endswith("rec.pdbqt") and os.path.getsize(path) > 100 and warns == [] and rescued == ["A:7"]
     (tmp_path / "in").mkdir()
     (tmp_path / "in" / "lib.sdf").write_text((tmp_path / "lib.sdf").read_text())
     (tmp_path / "in" / "x.smi").write_text("CCO ethanol\nXXX broken\n")
@@ -101,3 +101,16 @@ w.close()
     assert pt.check_receptor_pdbqt(path) is not None
     recs = pt.scan_ligands([str(tmp_path / "L")], False, set())
     assert len(recs) == len(r["files"]) and all(not x.problems for x in recs)
+
+
+def test_strip_hydrogens_and_residue_atoms(tmp_path):
+    def atom(n, name, res, resno, elem):
+        return "ATOM  %5d %-4s %3s A%4d    %8.3f%8.3f%8.3f  1.00  0.00          %2s" % (n, name, res, resno, 1.0, 2.0, 3.0, elem)
+    lines = [atom(1, "N", "HIS", 7, "N"), atom(2, "H", "HIS", 7, "H"), atom(3, "HE2", "HIS", 7, "H"), atom(4, "CA", "HIS", 7, "C"),
+             atom(5, "N", "ALA", 8, "N"), atom(6, "H", "ALA", 8, "H")]
+    src = tmp_path / "a.pdb"; src.write_text("\n".join(lines) + "\n")
+    assert prep.residue_atoms(str(src), ["A:7"]) == {"A:7": ["N", "H", "HE2", "CA"]}
+    out = tmp_path / "b.pdb"
+    assert prep.strip_hydrogens(str(src), str(out), ["A:7"]) == 2
+    kept = [l[12:16].strip() for l in out.read_text().splitlines()]
+    assert kept == ["N", "CA", "N", "H"]      # residue 8 keeps its hydrogen

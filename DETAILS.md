@@ -59,11 +59,14 @@ Meeko and RDKit are installed in a private environment, never into ChimeraX. Eve
 
 ## 2. Prepare tab (receptor and ligands)
 
-### Receptor (PDB / mmCIF → PDBQT)
-1. Pick a file, or an already open model (a copy is used; your model is not changed).
-2. **Cleaning in ChimeraX**: keep only chosen chains; remove water (`solvent`), ions/metals (`ions`), and other ligands/cofactors (everything that is not protein or nucleic acid); **add hydrogens** with `addh … hbond true`. The cleaned file is saved as `prepared/receptor/<name>_clean.pdb`.
-3. **Meeko**: `mk_prepare_receptor -o <name> -p` writes `prepared/receptor/<name>.pdbqt`. *Skip residues Meeko cannot handle* drops residues without a template (with a warning in the log) instead of stopping.
-4. The result is placed in the receptor field of the Inputs tab and shown in the scene.
+### Receptor (PDB / mmCIF → PDBQT): three steps
+Pick a file or an already open model (a copy is used; your model is never changed).
+
+1. **Clean receptor** opens a copy as `<name>_prep` and keeps it in the scene so you can inspect it. It uses ChimeraX **Dock Prep** (`dockprep`) with your choices: delete water, delete ions, delete alternate locations, incomplete side chains (complete with Dunbrack / Dynameomics / Richardson rotamers, truncate to Ala or Gly, or leave), and hydrogens; chains and "other ligands / cofactors" (everything that is not protein, nucleic acid, water or ions) are removed with `delete`. Add charges and mol2 output are not used, because Meeko computes its own charges.
+   - **Hydrogens: Add if missing (recommended)** adds hydrogens only when the structure has none, so protonation you set earlier (hydrogens, `HID`/`HIE`/`HIP`, `ASH`, `GLH`, `LYN`, `CYM` names) is never changed. *Always add* runs ChimeraX `addh` on every run; *Don't add* leaves the structure as it is.
+   - Meeko does **not** need hydrogens in its input: it adds the polar hydrogens from the residue names itself (histidines get its default state unless named `HID`/`HIE`/`HIP`). ChimeraX's hydrogens are optional but pick histidine states from the surroundings.
+2. **Minimize (optional)** runs ChimeraX `minimize … dockPrep false maxSteps N` on the copy (default 100 steps; "until convergence" is slow and not recommended). It runs in the background: wait until the Log shows it has finished. Dock Prep is not repeated, so hydrogens and protonation stay as they are. Standard residues use the force field's own charges, so no extra charges are needed unless non-standard residues or cofactors remain.
+3. **Convert with Meeko** saves the copy as `prepared/receptor/<name>_clean.pdb`, runs `mk_prepare_receptor -o <name> -p` and writes `prepared/receptor/<name>.pdbqt`. If a residue matches no Meeko template, it is retried **without its hydrogens** (Meeko then adds standard ones); residues that still fail are skipped (*Skip residues Meeko cannot handle*) and listed, because a skipped residue is missing from the receptor. The result is placed in the receptor field of the Inputs tab.
 
 ### Ligands (SDF / MOL / MOL2 / SMILES → PDBQT)
 1. Add files or folders (sub-folders included). `.smi` files are lines of `SMILES name`.
