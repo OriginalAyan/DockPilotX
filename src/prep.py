@@ -122,6 +122,9 @@ def prepare_receptor(env, info, clean_pdb, out_base, delete_bad=True, log=None, 
     without their hydrogens (Meeko then adds standard ones from its templates), which fixes residues whose
     added hydrogens do not fit any template.
     """
+    if info.get("prody") or info.get("prody_installed") is None:
+        # a ProDy that cannot be imported (e.g. no pkg_resources) is repaired, else the plain PDB reader is used
+        info = dict(prep_env.probe(env, repair=True, log=log, cancelled=cancelled).get("info") or info)
     help_text = tool_help(env, info, "mk_prepare_receptor")
     os.makedirs(os.path.dirname(out_base) or ".", exist_ok=True)
     path, skipped, cmd = _run_receptor(env, info, help_text, clean_pdb, out_base, delete_bad, log, cancelled)

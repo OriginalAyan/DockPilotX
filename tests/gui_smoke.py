@@ -324,7 +324,7 @@ assert "#1e88e5" in tool.tool_window.ui_area.styleSheet()
 P = tool.prepare
 assert tool.tabs.tabText(1) == "2 Prepare" and not P.conv_btn.isEnabled() and "not set up" in P.env_label.text().lower()
 tool.controller.prep_ok, tool.controller.prep_message = True, "Meeko 0.8.0 ready"; P.refresh_env(); assert P.conv_btn.isEnabled() and not P.goto_btn.isVisible()
-from chimerax.vinapilotx.receptor_clean import clean_receptor, minimize_model, save_model_pdb, HYDROGEN_CHOICES
+from chimerax.vinapilotx.receptor_clean import clean_receptor, minimize_model, save_model_pdb, SIDE_CHAIN_CHOICES, MinimizeWatcher
 src = os.path.join(tmp, "prot.pdb"); open(src, "w").write("ATOM\n")
 def run_clean(**kw):
     n = len(ran); m, msg = clean_receptor(session, src, "prot", chains="A, B", **kw); return m, msg, ran[n:]
@@ -334,15 +334,32 @@ assert any(c.startswith("open ") for c in cmds) and any("& ~/A,B" in c for c in 
 dp = [c for c in cmds if c.startswith("dockprep")][0]
 assert "delSolvent true" in dp and "delAltLocs true" in dp and "ah true" in dp and "ac false" in dp and "completeSideChains Dunbrack" in dp, dp
 assert "hydrogens added" in msg
-m2, msg2, cmds2 = run_clean(hydrogens="never", side_chains="none", del_water=False)
+m2, msg2, cmds2 = run_clean(hydrogens="never", side_chains="", del_water=False, del_incomplete=True, standardize=False)
 dp2 = [c for c in cmds2 if c.startswith("dockprep")][0]
-assert "ah false" in dp2 and "delSolvent false" in dp2 and "completeSideChains false" in dp2, dp2
+assert "ah false" in dp2 and "delSolvent false" in dp2 and "completeSideChains false" in dp2 and "delMissingBackbone true" in dp2 and "standardizeResidues none" in dp2, dp2
+assert "delMissingBackbone false" in dp and "standardizeResidues" not in dp, dp
+assert SIDE_CHAIN_CHOICES[0][0] == "Replace using Dunbrack rotamer library"
 m.atoms.element_names = ["H"] * 3 + ["C"] * 5      # structure that already has hydrogens
 assert clean_receptor.__defaults__ is None
 import chimerax.vinapilotx.receptor_clean as rc
 assert rc.count_hydrogens(m) == 3
 n = len(ran); minimize_model(session, m, 50, False); minimize_model(session, m, 50, True)
-assert "minimize #%s dockPrep false maxSteps 50" % ".".join(str(i) for i in m.id) in ran[n] and "maxSteps 0" in ran[n + 1]
+assert "minimize #%s dockPrep false maxSteps 50 logEnergy true" % ".".join(str(i) for i in m.id) in ran[n] and "maxSteps 0" in ran[n + 1]
+# completion detection from the status line
+done = []
+w = MinimizeWatcher(session, lambda msg, e: done.append((msg, e)))
+w._finish = lambda text, _o=w._finish: _o(text)
+class _L:
+    logs = []
+    def add_log(self, l): self.logs.append(l)
+    def remove_log(self, l): self.logs.remove(l)
+    def info(self, m): done.append(("LOG", m))
+session.logger.add_log = _L.add_log.__get__(_L()); session.logger.remove_log = _L.remove_log.__get__(_L())
+w.start(); w.status("Minimization: step 100 energy -1234.5"); w.status("Minimizing, energy = -2345.25 kJ/mol")
+w.status("Minimization completed"); _drain() if "_drain" in dir() else None
+from Qt.QtWidgets import QApplication; QApplication.processEvents(); QApplication.processEvents()
+assert w.finished and done[-1][1] == -2345.25 and "final energy -2345.25" in done[-1][0], done
+w.status("Minimization completed"); assert len(done) == 1
 save_model_pdb(session, m, os.path.join(tmp, "x.pdb")); assert any(c.startswith("save ") and "x.pdb" in c for c in ran)
 session.models.close([m, m2])
 P.receptor_done((((rec, ["A:7"], ["A:9"]), None))); assert tool.receptor_edit.text() == rec and "Skipped 1 residue(s): A:7" in P.rec_result.text() and "A:9" in P.rec_result.text()

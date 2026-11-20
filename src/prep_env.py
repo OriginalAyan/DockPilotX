@@ -25,9 +25,11 @@ MICROMAMBA_URLS = [
     "https://github.com/mamba-org/micromamba-releases/releases/latest/download/micromamba-{plat}{ext}",
 ]
 MICROMAMBA_API = "https://micro.mamba.pm/api/micromamba/{plat}/latest"
-CONDA_PACKAGES = ["python=3.11", "meeko", "rdkit", "scipy", "numpy", "gemmi", "prody"]
+# ProDy 2.4.x imports pkg_resources, which setuptools 82 and newer no longer ship.
+SETUPTOOLS_PIN = "setuptools<81"
+CONDA_PACKAGES = ["python=3.11", "meeko", "rdkit", "scipy", "numpy", "gemmi", "prody", "pip", SETUPTOOLS_PIN]
 PIP_CORE = ["meeko", "rdkit", "scipy", "numpy", "gemmi"]
-PIP_OPTIONAL = ["prody"]
+PIP_OPTIONAL = [SETUPTOOLS_PIN, "prody"]
 
 
 class PrepError(RuntimeError):
@@ -175,8 +177,15 @@ try:
     d["meeko"] = m.version("meeko")
 except Exception as e:
     d["meeko"] = None; d["meeko_error"] = str(e)
-for mod in ("rdkit", "scipy", "numpy", "gemmi", "prody"):
+for mod in ("rdkit", "scipy", "numpy", "gemmi"):
     d[mod] = u.find_spec(mod) is not None
+try:
+    import prody
+    d["prody"] = True
+except BaseException as e:   # installed but not importable counts as unavailable
+    d["prody"] = False
+    d["prody_installed"] = u.find_spec("prody") is not None
+    d["prody_error"] = "%s: %s" % (type(e).__name__, e)
 for tool in ("mk_prepare_ligand", "mk_prepare_receptor"):
     try:
         d["cli_" + tool] = u.find_spec("meeko.cli." + tool) is not None
@@ -186,8 +195,36 @@ print("VPXPROBE" + json.dumps(d))
 '''
 
 
-def probe(env, timeout=180):
-    """Return {'ok': bool, 'message': str, 'info': dict}. ok means Meeko and RDKit can be imported."""
+def repair_prody(env, log=None, cancelled=None):
+    """Install a setuptools that still has pkg_resources so ProDy can be imported. True if pip succeeded."""
+    if log:
+        log("ProDy cannot be imported (needs pkg_resources). Installing %s ..." % SETUPTOOLS_PIN)
+    try:
+        code = run_stream(env.python_command(["-m", "pip", "install", SETUPTOOLS_PIN, "--disable-pip-version-check"]),
+                          log, cancelled, env=env.environ(), timeout=600)
+    except PrepError as err:
+        if log:
+            log("Repair failed: %s" % err)
+        return False
+    return code == 0
+
+
+def probe(env, timeout=180, repair=False, log=None, cancelled=None):
+    """Return {'ok': bool, 'message': str, 'info': dict}. ok means Meeko and RDKit can be imported.
+
+    With *repair*, a ProDy that is installed but cannot be imported (missing pkg_resources) is fixed first."""
+    res = _probe_once(env, timeout)
+    info = res.get("info", {})
+    if (repair and res["ok"] and not info.get("prody") and info.get("prody_installed")
+            and "pkg_resources" in info.get("prody_error", "") and env.kind != "external"):
+        if repair_prody(env, log, cancelled):
+            res = _probe_once(env, timeout)
+            if log:
+                log("ProDy is now %s." % ("available" if res.get("info", {}).get("prody") else "still unavailable"))
+    return res
+
+
+def _probe_once(env, timeout=180):
     if env is None or not env.exists():
         return {"ok": False, "message": "No preparation environment is set up.", "info": {}}
     lines = []
@@ -220,7 +257,7 @@ def probe(env, timeout=180):
     if not info.get("rdkit"):
         return {"ok": False, "message": "RDKit is missing from this environment.", "info": info}
     return {"ok": True, "message": "Meeko %s ready (Python %s%s)." % (
-        info["meeko"], info["python"], "" if info.get("prody") else ", no ProDy"), "info": info}
+        info["meeko"], info["python"], "" if info.get("prody") else ", ProDy unavailable (the PDB reader of Meeko is used instead)"), "info": info}
 
 
 def tool_argv(env, info, tool):

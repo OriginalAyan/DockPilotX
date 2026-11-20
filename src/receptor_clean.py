@@ -6,23 +6,25 @@ the scene so it can be minimized and inspected before it is saved and passed to 
 """
 
 import os
+import re
 
 from chimerax.core.commands import run
 from chimerax.core.errors import UserError
 
-HYDROGEN_CHOICES = [
-    ("Add if missing (recommended)", "auto"),
-    ("Always add missing hydrogens", "always"),
-    ("Don't add", "never"),
-]
+# Dock Prep's own wording for the incomplete side chain methods
 SIDE_CHAIN_CHOICES = [
-    ("Complete with Dunbrack rotamers", "Dunbrack"),
-    ("Complete with Dynameomics rotamers", "Dynameomics"),
-    ("Complete with Richardson (common)", "Richardson.common"),
-    ("Complete with Richardson (most probable)", "Richardson.mode"),
-    ("Truncate to alanine", "ala"),
-    ("Truncate to glycine", "gly"),
-    ("Leave as they are", "none"),
+    ("Replace using Dunbrack rotamer library", "Dunbrack"),
+    ("Replace using Dynameomics rotamer library", "Dynameomics"),
+    ("Replace using Richardson common rotamer library", "Richardson.common"),
+    ("Replace using Richardson most probable rotamer library", "Richardson.mode"),
+    ("Change to alanine", "ala"),
+    ("Change to glycine", "gly"),
+]
+STANDARDIZE_NOTE = [
+    "selenomethionine (MSE) \u2192 methionine (MET)",
+    "bromo-UMP (5BU) \u2192 UMP (U)",
+    "methylselenyl-dUMP (UMS) \u2192 UMP (U)",
+    "methylselenyl-dCMP (CSL) \u2192 CMP (C)",
 ]
 
 
@@ -53,37 +55,31 @@ def count_hydrogens(model):
         return 0
 
 
-def _dockprep(session, spec, options, side_chains, say):
-    """Run dockprep. The side-chain keyword is the least certain one, so it is retried on failure."""
-    sc_options = []
-    if side_chains in ("none", "false", ""):
-        sc_options = ["completeSideChains false"]
-    elif side_chains:
-        sc_options = ["completeSideChains %s" % side_chains]
-    candidates = [sc_options] if sc_options else [[]]
-    if side_chains in ("none", "false", ""):
-        candidates.append(["completeSideChains none"])
-    candidates.append([])
+def _dockprep(session, spec, base, optional, say):
+    """Run dockprep. *optional* keywords are dropped (with a note) if this ChimeraX rejects them."""
     last = None
-    for sc in candidates:
+    for drop in (False, True):
+        opts = list(base) + ([] if drop else list(optional))
         try:
-            run(session, "dockprep %s %s" % (spec, " ".join(options + sc)))
-            if sc != candidates[0] and sc == []:
-                say("This ChimeraX did not accept the side-chain option; Dock Prep's default was used.")
+            run(session, "dockprep %s %s" % (spec, " ".join(opts)))
+            if drop and optional:
+                say("This ChimeraX did not accept %s; Dock Prep's defaults were used for them." % " / ".join(optional))
             return
         except UserError as err:
             last = err
-            if not sc:
+            if not optional:
                 break
     raise last
 
 
 def clean_receptor(session, source, name, *, chains="", del_water=True, del_ions=True, del_ligands=True,
-                   del_altlocs=True, side_chains="Dunbrack", hydrogens="auto", log=None):
+                   del_altlocs=True, del_incomplete=False, standardize=True,
+                   side_chains="Dunbrack", hydrogens="auto", log=None):
     """Open *source* as a new model named ``<name>_prep`` and clean it. Returns (model, summary).
 
-    hydrogens: 'auto' = add only if the structure has none (keeps protonation you already set),
-    'always' = add missing hydrogens, 'never' = leave as is.
+    side_chains: a rotamer method / 'ala' / 'gly', or '' to leave incomplete side chains alone.
+    hydrogens: 'auto' = add hydrogens only if the structure has none (keeps protonation you already set),
+    'always' = add missing hydrogens (Dock Prep's "Add hydrogens"), 'never' = add none.
     """
     say = log or (lambda m: None)
     top = lambda: [m for m in session.models.list() if len(m.id) == 1]
@@ -109,20 +105,24 @@ def clean_receptor(session, source, name, *, chains="", del_water=True, del_ions
             run(session, "delete %s & ~(protein|nucleic|solvent|ions)" % spec)
         n_h = count_hydrogens(target)
         add_h = hydrogens == "always" or (hydrogens == "auto" and n_h == 0)
-        options = ["delSolvent %s" % _b(del_water), "delIons %s" % _b(del_ions),
-                   "delAltLocs %s" % _b(del_altlocs), "ah %s" % _b(add_h), "ac false"]
-        _dockprep(session, spec, options, side_chains, say)
+        base = ["delSolvent %s" % _b(del_water), "delIons %s" % _b(del_ions),
+                "delAltLocs %s" % _b(del_altlocs), "delMissingBackbone %s" % _b(del_incomplete),
+                "ah %s" % _b(add_h), "ac false"]
+        optional = ["completeSideChains %s" % (side_chains if side_chains else "false")]
+        if not standardize:
+            optional.append("standardizeResidues none")
+        _dockprep(session, spec, base, optional, say)
         try:
             target.name = "%s_prep" % name
         except Exception:
             pass
         n1 = len(target.atoms) if hasattr(target, "atoms") else 0
         if hydrogens == "never":
-            h_note = "hydrogens left as they are (%d present)" % n_h
+            h_note = "no hydrogens added (%d present)" % n_h
         elif add_h:
             h_note = "hydrogens added"
         else:
-            h_note = "existing hydrogens kept (%d), none added" % n_h
+            h_note = "structure already has %d hydrogens, none added" % n_h
         ok = True
         return target, "Cleaned %s: %d -> %d atoms; %s." % (os.path.basename(source), n0, n1, h_note)
     finally:
@@ -141,11 +141,105 @@ def save_model_pdb(session, model, out_pdb):
         run(session, "save %s %s" % (_q(out_pdb), spec))
 
 
-def minimize_model(session, model, steps=100, until_converged=False):
-    """Start ChimeraX energy minimization (runs in the background; ChimeraX shows live updates).
+class MinimizeWatcher:
+    """Listens to ChimeraX's status line to tell when a minimization has finished.
 
-    Dock Prep is not repeated, so hydrogens, protonation and charges stay as they are. Standard residues
-    use the force field's own charges.
+    ``minimize`` runs in the background and only reports on the status line (transient). This hook
+    notices "Minimization ... completed", writes a permanent line (with the last energy) to the Log and
+    calls *on_done*. It removes itself afterwards, or when stopped.
+    """
+
+    _ENERGY = re.compile(r"energy[^\d+-]{0,12}(-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)", re.I)
+
+    def __init__(self, session, on_done, steps_note=""):
+        self.session, self.on_done, self.steps_note = session, on_done, steps_note
+        self.energies = []
+        self.finished = False
+        self._added = False
+        self.excludes_log = False
+
+    # -- logger interface ------------------------------------------------
+    def log(self, level, msg, *args, **kw):
+        return False
+
+    def status(self, msg, color="black", secondary=False):
+        try:
+            text = str(msg)
+            low = text.lower()
+            if "minimi" not in low and "energy" not in low:
+                return
+            m = self._ENERGY.search(text)
+            if m:
+                self.energies.append(float(m.group(1)))
+            if "minimi" in low and ("complete" in low or "converged" in low or "finished" in low):
+                self._defer_finish(text)
+        except Exception:
+            pass
+
+    def _defer_finish(self, text):
+        """Finish outside the logger's own loop (removing a log while it iterates would skip entries)."""
+        if self.finished:
+            return
+        try:
+            from Qt.QtCore import QTimer
+            QTimer.singleShot(0, lambda: self._finish(text))
+        except Exception:
+            self._finish(text)
+
+    def start(self):
+        try:
+            self.session.logger.add_log(self)
+            self._added = True
+        except Exception:
+            self._added = False
+        return self._added
+
+    def stop(self):
+        if self._added:
+            try:
+                self.session.logger.remove_log(self)
+            except Exception:
+                pass
+            self._added = False
+
+    def _finish(self, text):
+        if self.finished:
+            return
+        self.finished = True
+        self.stop()
+        energy = self.energies[-1] if self.energies else None
+        msg = "Minimization completed"
+        if energy is not None:
+            msg += " (final energy %.2f)" % energy
+        if self.steps_note:
+            msg += ". " + self.steps_note
+        self.session.logger.info(msg)
+        try:
+            self.on_done(msg, energy)
+        except Exception:
+            pass
+
+
+def minimize_model(session, model, steps=100, until_converged=False, on_done=None):
+    """Start ChimeraX energy minimization (runs in the background).
+
+    Energies are written to the Log (``logEnergy true``) and, when it finishes, "Minimization completed" is
+    written there too and *on_done(message, last_energy)* is called. Dock Prep is not repeated, so
+    hydrogens, protonation and charges stay as they are. Returns the watcher (call ``.stop()`` to cancel).
     """
     max_steps = 0 if until_converged else int(steps)
-    run(session, "minimize %s dockPrep false maxSteps %d" % (_spec(model), max_steps))
+    watcher = None
+    if on_done is not None:
+        watcher = MinimizeWatcher(session, on_done)
+        watcher.start()
+    base = "minimize %s dockPrep false maxSteps %d" % (_spec(model), max_steps)
+    try:
+        try:
+            run(session, base + " logEnergy true")
+        except UserError:           # older ChimeraX without logEnergy
+            run(session, base)
+    except UserError:
+        if watcher:
+            watcher.stop()
+        raise
+    return watcher

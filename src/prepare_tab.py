@@ -10,12 +10,13 @@ from Qt.QtWidgets import (
 )
 
 from . import prep
-from .receptor_clean import HYDROGEN_CHOICES, SIDE_CHAIN_CHOICES
+from .receptor_clean import SIDE_CHAIN_CHOICES, STANDARDIZE_NOTE
 from .pdbqt_tools import safe_name
 
 OK_STYLE = "color: #2e7d32; font-weight: bold;"
 BAD_STYLE = "color: #c62828; font-weight: bold;"
 WARN_STYLE = "color: #b26a00;"
+MIN_TEXT = "2. Minimize (optional)"
 
 
 class PrepareTab(QWidget):
@@ -28,6 +29,7 @@ class PrepareTab(QWidget):
         self._prep_model = None       # the cleaned copy in the scene
         self._prep_name = None
         self._prep_source = None
+        self._min_watch = None
         self._build_ui()
         self.refresh_env()
 
@@ -61,35 +63,52 @@ class PrepareTab(QWidget):
         self.chains_edit = QLineEdit()
         self.chains_edit.setPlaceholderText("Keep only chains, e.g. A,B (blank = all)")
         gl.addWidget(self.chains_edit)
-        tips = {
-            "water": "Delete water molecules.",
-            "ions": "Delete ions and metals. Keep them only if Meeko supports them.",
-            "ligands": "Delete ligands, cofactors and other non-polymer groups.",
-            "altlocs": "Keep only the alternate location in use (highest occupancy).",
-        }
-        self.water_cb = QCheckBox("Delete water")
-        self.ions_cb = QCheckBox("Delete ions / metals")
+        self.water_cb = QCheckBox("Delete solvent")
+        self.ions_cb = QCheckBox("Delete non-complexed ions")
+        self.alt_cb = QCheckBox("Delete non-current alternate locations")
+        self.bb_cb = QCheckBox("Delete residues with incomplete backbones")
         self.lig_cb = QCheckBox("Delete other ligands / cofactors")
-        self.alt_cb = QCheckBox("Delete alternate locations")
-        for cb, key in ((self.water_cb, "water"), (self.ions_cb, "ions"), (self.lig_cb, "ligands"), (self.alt_cb, "altlocs")):
-            cb.setChecked(True)
-            cb.setToolTip(tips[key])
+        self.std_cb = QCheckBox("\"Standardize\" certain residue types:")
+        tips = {
+            self.water_cb: "Dock Prep option.",
+            self.ions_cb: "Dock Prep option. Ions not bound to the ligands are removed.",
+            self.alt_cb: "Dock Prep option. Keeps the alternate location in use (highest occupancy).",
+            self.bb_cb: "Dock Prep option (off by default).",
+            self.lig_cb: "Not part of Dock Prep. Removes ligands, cofactors and other non-polymer groups.",
+            self.std_cb: "Dock Prep option.",
+        }
+        for cb in (self.water_cb, self.ions_cb, self.alt_cb, self.bb_cb, self.lig_cb, self.std_cb):
+            cb.setChecked(cb is not self.bb_cb)
+            cb.setToolTip(tips[cb])
             gl.addWidget(cb)
-        gl.addWidget(QLabel("Incomplete side chains"))
+            if cb is self.std_cb:
+                note = QLabel("\n".join("   \u2022 " + t for t in STANDARDIZE_NOTE))
+                note.setStyleSheet("color: gray;")
+                gl.addWidget(note)
+        row = QHBoxLayout()
+        self.sc_cb = QCheckBox("Incomplete side chains:")
+        self.sc_cb.setChecked(True)
+        self.sc_cb.setToolTip("Dock Prep option. Unchecked: incomplete side chains are left as they are.")
+        row.addWidget(self.sc_cb)
         self.sc_combo = QComboBox()
         for label, value in SIDE_CHAIN_CHOICES:
             self.sc_combo.addItem(label, value)
-        self.sc_combo.setToolTip("Missing side-chain atoms are rebuilt from a rotamer library (as in Dock Prep).")
-        gl.addWidget(self.sc_combo)
-        gl.addWidget(QLabel("Hydrogens"))
-        self.h_combo = QComboBox()
-        for label, value in HYDROGEN_CHOICES:
-            self.h_combo.addItem(label, value)
-        self.h_combo.setToolTip(
-            "Add if missing: hydrogens are added only when the structure has none. Existing hydrogens and\n"
-            "histidine names (HID/HIE/HIP) are kept, so protonation you set earlier is not changed.\n"
-            "Don't add: Meeko adds standard hydrogens itself (default histidine state).")
-        gl.addWidget(self.h_combo)
+        self.sc_cb.toggled.connect(self.sc_combo.setEnabled)
+        row.addWidget(self.sc_combo, 1)
+        gl.addLayout(row)
+        self.h_cb = QCheckBox("Add hydrogens")
+        self.h_cb.setChecked(True)
+        self.h_cb.setToolTip("Dock Prep option. Meeko adds standard polar hydrogens itself, so unchecking is possible,\n"
+                             "but then every histidine gets Meeko's default protonation.")
+        gl.addWidget(self.h_cb)
+        self.h_only_cb = QCheckBox("Only if the structure has none")
+        self.h_only_cb.setChecked(True)
+        self.h_only_cb.setToolTip("Checked: a structure that already has hydrogens is left alone, so protonation you set\n"
+                                  "earlier (e.g. HID / HIE / HIP) is kept.\n"
+                                  "Unchecked: Dock Prep also adds hydrogens that are missing from a partly protonated structure.")
+        self.h_only_cb.setStyleSheet("margin-left: 18px;")
+        self.h_cb.toggled.connect(self.h_only_cb.setEnabled)
+        gl.addWidget(self.h_only_cb)
         self.bad_cb = QCheckBox("Skip residues Meeko cannot handle")
         self.bad_cb.setToolTip("Residues without a matching template are dropped, with a warning, instead of stopping.")
         self.bad_cb.setChecked(True)
@@ -99,9 +118,9 @@ class PrepareTab(QWidget):
         self.rec_btn.clicked.connect(self._clean_receptor)
         gl.addWidget(self.rec_btn)
         row = QHBoxLayout()
-        self.min_btn = QPushButton("2. Minimize (optional)")
+        self.min_btn = QPushButton(MIN_TEXT)
         self.min_btn.setToolTip("ChimeraX energy minimization of the cleaned copy. Moves all atoms. "
-                                "Runs in the background; wait for it to finish in the Log.")
+                                "Energies go to the ChimeraX Log; this tool tells you when it is done.")
         self.min_btn.clicked.connect(self._minimize)
         row.addWidget(self.min_btn)
         self.min_steps = QSpinBox()
@@ -185,7 +204,7 @@ class PrepareTab(QWidget):
         for b in (self.conv_btn, self.lig_btn):
             b.setEnabled(ok)
         self.rec_btn.setEnabled(not busy)
-        self.min_btn.setEnabled(not busy)
+        self.min_btn.setEnabled(True)
         self.cancel_btn.setVisible(busy)
         self.bar.setVisible(busy)
         if busy:
@@ -268,7 +287,9 @@ class PrepareTab(QWidget):
                 self.session, source, name, chains=self.chains_edit.text(),
                 del_water=self.water_cb.isChecked(), del_ions=self.ions_cb.isChecked(),
                 del_ligands=self.lig_cb.isChecked(), del_altlocs=self.alt_cb.isChecked(),
-                side_chains=self.sc_combo.currentData(), hydrogens=self.h_combo.currentData(), log=self.log_line)
+                del_incomplete=self.bb_cb.isChecked(), standardize=self.std_cb.isChecked(),
+                side_chains=self.sc_combo.currentData() if self.sc_cb.isChecked() else "",
+                hydrogens=self._hydrogen_mode(), log=self.log_line)
         except Exception as err:
             self._fail("Cleaning failed: %s" % err)
             return False
@@ -278,23 +299,58 @@ class PrepareTab(QWidget):
         self.rec_result.setStyleSheet(OK_STYLE)
         return True
 
+    def _hydrogen_mode(self):
+        if not self.h_cb.isChecked():
+            return "never"
+        return "auto" if self.h_only_cb.isChecked() else "always"
+
     def _minimize(self):
         from .receptor_clean import minimize_model
+        if self._min_watch is not None:          # running: this button is "Stop"
+            self._stop_minimize()
+            return
         if not self._prep_alive() and not self._clean_receptor():
             return
         if not (self.ions_cb.isChecked() and self.lig_cb.isChecked()):
             self.log_line("Note: ligands/ions are kept, so minimization may fail for lack of parameters.")
         try:
-            minimize_model(self.session, self._prep_model, self.min_steps.value(), self.min_conv.isChecked())
+            self._min_watch = minimize_model(self.session, self._prep_model, self.min_steps.value(),
+                                             self.min_conv.isChecked(), on_done=self._minimize_done)
         except Exception as err:
             self._fail("Minimization failed: %s" % err)
             return
-        self.rec_result.setText("Minimization started. Watch the Log; run step 3 when it has finished.")
+        self.min_btn.setText("2. Stop minimization")
+        self.rec_result.setText("Minimizing ... energies are written to the ChimeraX Log.")
         self.rec_result.setStyleSheet(WARN_STYLE)
+
+    def _stop_minimize(self):
+        from chimerax.core.commands import run
+        w, self._min_watch = self._min_watch, None
+        if w is not None:
+            w.stop()
+        try:
+            run(self.session, "minimize stop")
+        except Exception:
+            pass
+        self.min_btn.setText(MIN_TEXT)
+        self.rec_result.setText("Minimization stopped. You can run step 3 now.")
+        self.rec_result.setStyleSheet(WARN_STYLE)
+
+    def _minimize_done(self, message, energy):
+        self._min_watch = None
+        self.min_btn.setText(MIN_TEXT)
+        self.rec_result.setText("\u2714 %s. Step 3 converts the minimized model." % message)
+        self.rec_result.setStyleSheet(OK_STYLE)
+        self.log_line(message)
+        self.conv_btn.setEnabled(self.controller.prep_ok and not self.controller.prep_busy)
 
     def _convert_receptor(self):
         """Step 3: save the cleaned copy and run Meeko."""
         from .receptor_clean import save_model_pdb
+        if self._min_watch is not None:
+            self.rec_result.setText("Minimization is still running. Wait for it to finish (or press Stop).")
+            self.rec_result.setStyleSheet(WARN_STYLE)
+            return
         wd = self._workdir()
         if wd is None:
             return

@@ -168,7 +168,7 @@ class DockingController:
         env = self.prep_env
 
         def work():
-            return prep_env.probe(env)
+            return prep_env.probe(env, repair=True, log=self._prep_log, cancelled=self._prep_cancel.is_set)
 
         def done(res, err):
             self._prep_apply(res if res else {"ok": False, "message": err or "failed", "info": {}})
@@ -185,7 +185,7 @@ class DockingController:
                 try:
                     mm_base = prep_env.short_base_dir(os.path.join(base_dir, "micromamba"))
                     env = prep_env.create_micromamba_env(mm_base, log, cancelled)
-                    res = prep_env.probe(env)
+                    res = prep_env.probe(env, repair=True, log=log, cancelled=cancelled)
                     if not res["ok"]:
                         raise prep_env.PrepError(res["message"])
                 except prep_env.PrepError as err:
@@ -202,7 +202,7 @@ class DockingController:
                 env = prep_env.create_venv_env(base_dir, log, cancelled)
             if env is None:
                 raise prep_env.PrepError("; ".join(errors) or "Setup failed.")
-            return env, prep_env.probe(env)
+            return env, prep_env.probe(env, repair=True, log=log, cancelled=cancelled)
 
         def done(res, err):
             if err:

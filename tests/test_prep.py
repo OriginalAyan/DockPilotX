@@ -15,6 +15,25 @@ def test_receptor_args_versions():
     assert old[:2] == ["-i", "c.pdb"] and "--allow_bad_res" in old
 
 
+def test_probe_flags_unimportable_prody(tmp_path):
+    """A ProDy that is installed but fails to import must count as unavailable (real import, not find_spec)."""
+    site = tmp_path / "site"; (site / "prody").mkdir(parents=True)
+    (site / "prody" / "__init__.py").write_text("import pkg_resources_not_there\n")
+    py = pe.external_env(sys.executable)
+    py.python_command = lambda args: [sys.executable] + list(args)
+    env = pe.PrepEnv("external", python=sys.executable)
+    os.environ["PYTHONPATH"] = str(site)
+    try:
+        info = pe._probe_once(env)["info"]
+    finally:
+        os.environ.pop("PYTHONPATH", None)
+    assert info.get("prody") is False and info.get("prody_installed") is True and "pkg_resources_not_there" in info["prody_error"]
+
+
+def test_setuptools_pinned():
+    assert pe.SETUPTOOLS_PIN in pe.CONDA_PACKAGES and pe.SETUPTOOLS_PIN in pe.PIP_OPTIONAL
+
+
 def test_list_ligand_files(tmp_path):
     (tmp_path / "sub").mkdir()
     for n in ("a.sdf", "b.MOL2", "c.txt", "sub/d.smi", "e.pdb"):
