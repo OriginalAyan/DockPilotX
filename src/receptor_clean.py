@@ -74,12 +74,11 @@ def _dockprep(session, spec, base, optional, say):
 
 def clean_receptor(session, source, name, *, chains="", del_water=True, del_ions=True, del_ligands=True,
                    del_altlocs=True, del_incomplete=False, standardize=True,
-                   side_chains="Dunbrack", hydrogens="auto", log=None):
+                   side_chains="Dunbrack", log=None):
     """Open *source* as a new model named ``<name>_prep`` and clean it. Returns (model, summary).
 
     side_chains: a rotamer method / 'ala' / 'gly', or '' to leave incomplete side chains alone.
-    hydrogens: 'auto' = add hydrogens only if the structure has none (keeps protonation you already set),
-    'always' = add missing hydrogens (Dock Prep's "Add hydrogens"), 'never' = add none.
+    Hydrogens are not touched here (see hydrogens.py and the Hydrogens step).
     """
     say = log or (lambda m: None)
     top = lambda: [m for m in session.models.list() if len(m.id) == 1]
@@ -103,11 +102,9 @@ def clean_receptor(session, source, name, *, chains="", del_water=True, del_ions
             say("Kept chain(s) %s." % letters)
         if del_ligands:
             run(session, "delete %s & ~(protein|nucleic|solvent|ions)" % spec)
-        n_h = count_hydrogens(target)
-        add_h = hydrogens == "always" or (hydrogens == "auto" and n_h == 0)
         base = ["delSolvent %s" % _b(del_water), "delIons %s" % _b(del_ions),
                 "delAltLocs %s" % _b(del_altlocs), "delMissingBackbone %s" % _b(del_incomplete),
-                "ah %s" % _b(add_h), "ac false"]
+                "ah false", "ac false"]
         optional = ["completeSideChains %s" % (side_chains if side_chains else "false")]
         if not standardize:
             optional.append("standardizeResidues none")
@@ -117,20 +114,34 @@ def clean_receptor(session, source, name, *, chains="", del_water=True, del_ions
         except Exception:
             pass
         n1 = len(target.atoms) if hasattr(target, "atoms") else 0
-        if hydrogens == "never":
-            h_note = "no hydrogens added (%d present)" % n_h
-        elif add_h:
-            h_note = "hydrogens added"
-        else:
-            h_note = "structure already has %d hydrogens, none added" % n_h
         ok = True
-        return target, "Cleaned %s: %d -> %d atoms; %s." % (os.path.basename(source), n0, n1, h_note)
+        return target, "Cleaned %s: %d -> %d atoms." % (os.path.basename(source), n0, n1)
     finally:
         if not ok:
             try:
                 session.models.close([m for m in new if not getattr(m, "deleted", False)])
             except Exception:
                 pass
+
+
+def open_prep_model(session, path, name):
+    """Open *path* as a new model named ``<name>_prep`` (used for the PDB2PQR result)."""
+    top = lambda: [m for m in session.models.list() if len(m.id) == 1]
+    before = set(top())
+    run(session, "open %s" % _q(path))
+    new = [m for m in top() if m not in before]
+    if not new:
+        raise UserError("ChimeraX could not open %s" % path)
+    model = new[0]
+    kids = model.child_models()
+    target = kids[0] if kids and not hasattr(model, "atoms") else model
+    for extra in new[1:]:
+        extra.delete()
+    try:
+        target.name = "%s_prep" % name
+    except Exception:
+        pass
+    return target
 
 
 def save_model_pdb(session, model, out_pdb):

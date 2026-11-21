@@ -177,6 +177,11 @@ try:
     d["meeko"] = m.version("meeko")
 except Exception as e:
     d["meeko"] = None; d["meeko_error"] = str(e)
+try:
+    d["pdb2pqr"] = m.version("pdb2pqr")
+    import pdb2pqr, propka
+except Exception as e:
+    d["pdb2pqr"] = None
 for mod in ("rdkit", "scipy", "numpy", "gemmi"):
     d[mod] = u.find_spec(mod) is not None
 try:
@@ -207,6 +212,21 @@ def repair_prody(env, log=None, cancelled=None):
             log("Repair failed: %s" % err)
         return False
     return code == 0
+
+
+def install_pdb2pqr(env, log=None, cancelled=None):
+    """pip-install PDB2PQR (with PROPKA) into the preparation environment. Returns True on success."""
+    if env is None or not env.exists():
+        raise PrepError("Set up Meeko first: PDB2PQR is installed into the same private environment.")
+    if log:
+        log("pip install pdb2pqr")
+    code = run_stream(env.python_command(["-m", "pip", "install", "pdb2pqr", "--disable-pip-version-check"]),
+                      log, cancelled, env=env.environ(), idle_timeout=900)
+    if code == -1:
+        raise PrepError("Cancelled.")
+    if code != 0:
+        raise PrepError("pip could not install pdb2pqr (exit code %d)." % code)
+    return True
 
 
 def probe(env, timeout=180, repair=False, log=None, cancelled=None):

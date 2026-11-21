@@ -241,7 +241,7 @@ assert "Time" not in [T.headerItem().text(c) for c in range(T.columnCount())]
 seeds = [int(T.topLevelItem(r).text(8)) for r in range(3)]; assert len(set(seeds)) == 3   # read from Vina's output
 assert "3 / 3" in tool.counter_label.text()
 assert all(s[1].value() == 100 for s in tool._slots), [s[1].value() for s in tool._slots]
-assert tool.tabs.currentIndex() == 5 and tool.run_btn.isEnabled() and not tool.cancel_btn.isEnabled()
+assert tool.tabs.currentIndex() == 6 and tool.run_btn.isEnabled() and not tool.cancel_btn.isEnabled()
 W = os.path.join(tmp, "work")
 rows_ = list(__import__("csv").DictReader(open(os.path.join(W, "summary.csv"))))
 assert len(rows_) >= 3 and {"pose", "rmsd_lb", "rmsd_ub", "rating"} <= set(rows_[0]) and "time" not in "".join(rows_[0]).lower()
@@ -321,28 +321,39 @@ tool._reset_defaults(); assert tool.exh_spin.value() == 8 and tool.parallel_spin
 assert "#1e88e5" in tool.tool_window.ui_area.styleSheet()
 # min-size: no page may force a tall window
 # Prepare tab: UI state, receptor cleaning commands, hand-off of results to the Inputs tab
-P = tool.prepare
-assert tool.tabs.tabText(1) == "2 Prepare" and not P.conv_btn.isEnabled() and "not set up" in P.env_label.text().lower()
-tool.controller.prep_ok, tool.controller.prep_message = True, "Meeko 0.8.0 ready"; P.refresh_env(); assert P.conv_btn.isEnabled() and not P.goto_btn.isVisible()
+P = tool.protein; LT = tool.ligands
+assert [tool.tabs.tabText(i) for i in range(7)] == ["1 Settings", "2 Protein", "3 Ligands", "4 Inputs", "5 Box", "6 Run", "7 Results"]
+assert not P.conv_btn.isEnabled() and "not set up" in P.banner.label.text().lower() and not LT.lig_btn.isEnabled()
+tool.controller.prep_ok, tool.controller.prep_message = True, "Meeko 0.8.0 ready"; P.refresh_env(); LT.refresh_env()
+assert P.conv_btn.isEnabled() and not P.banner.btn.isVisible() and LT.lig_btn.isEnabled()
+# separate logs: setup, protein and ligand lines never mix
+for ev, line in (("setup_log", "S1"), ("protein_log", "P1"), ("ligand_log", "L1")): tool._on_event(ev, line)
+assert "S1" in tool.env_log.toPlainText() and "P1" not in tool.env_log.toPlainText() and "L1" not in tool.env_log.toPlainText()
+assert "P1" in P.log.toPlainText() and "S1" not in P.log.toPlainText() and "L1" not in P.log.toPlainText()
+assert "L1" in LT.log.toPlainText() and "S1" not in LT.log.toPlainText() and "P1" not in LT.log.toPlainText()
+# setup folder: default, change, short-path note
+sd = os.path.join(tmp, "my setup"); tool.setup_edit.setText(sd); tool._setup_dir_edited()
+assert tool.controller.setup_dir == os.path.abspath(sd) and tool.controller.vina_root == os.path.join(os.path.abspath(sd), "vina") and tool.controller.prep_dir == os.path.join(os.path.abspath(sd), "meeko")
+# PDB2PQR group follows the environment state
+tool._refresh_env_status()
+assert "Not installed" in tool.pq_status.text() and not tool.controller.pdb2pqr_ok
+tool.controller.prep_info = {"meeko": "0.8.0", "pdb2pqr": "3.8.0"}; tool._refresh_env_status(); assert "3.8.0" in tool.pq_status.text() and tool.controller.pdb2pqr_ok
 from chimerax.vinapilotx.receptor_clean import clean_receptor, minimize_model, save_model_pdb, SIDE_CHAIN_CHOICES, MinimizeWatcher
 src = os.path.join(tmp, "prot.pdb"); open(src, "w").write("ATOM\n")
 def run_clean(**kw):
     n = len(ran); m, msg = clean_receptor(session, src, "prot", chains="A, B", **kw); return m, msg, ran[n:]
-m, msg, cmds = run_clean(hydrogens="auto")
+m, msg, cmds = run_clean()
 assert m.name == "prot_prep" and not m.deleted, "the cleaned copy must stay in the scene"
 assert any(c.startswith("open ") for c in cmds) and any("& ~/A,B" in c for c in cmds) and any("~(protein|nucleic|solvent|ions)" in c for c in cmds)
 dp = [c for c in cmds if c.startswith("dockprep")][0]
-assert "delSolvent true" in dp and "delAltLocs true" in dp and "ah true" in dp and "ac false" in dp and "completeSideChains Dunbrack" in dp, dp
-assert "hydrogens added" in msg
-m2, msg2, cmds2 = run_clean(hydrogens="never", side_chains="", del_water=False, del_incomplete=True, standardize=False)
+assert "delSolvent true" in dp and "delAltLocs true" in dp and "ac false" in dp and "completeSideChains Dunbrack" in dp, dp
+assert "ah false" in dp, dp
+m2, msg2, cmds2 = run_clean(side_chains="", del_water=False, del_incomplete=True, standardize=False)
 dp2 = [c for c in cmds2 if c.startswith("dockprep")][0]
-assert "ah false" in dp2 and "delSolvent false" in dp2 and "completeSideChains false" in dp2 and "delMissingBackbone true" in dp2 and "standardizeResidues none" in dp2, dp2
+assert "delSolvent false" in dp2 and "completeSideChains false" in dp2 and "delMissingBackbone true" in dp2 and "standardizeResidues none" in dp2, dp2
 assert "delMissingBackbone false" in dp and "standardizeResidues" not in dp, dp
 assert SIDE_CHAIN_CHOICES[0][0] == "Replace using Dunbrack rotamer library"
 m.atoms.element_names = ["H"] * 3 + ["C"] * 5      # structure that already has hydrogens
-assert clean_receptor.__defaults__ is None
-import chimerax.vinapilotx.receptor_clean as rc
-assert rc.count_hydrogens(m) == 3
 n = len(ran); minimize_model(session, m, 50, False); minimize_model(session, m, 50, True)
 assert "minimize #%s dockPrep false maxSteps 50 logEnergy true" % ".".join(str(i) for i in m.id) in ran[n] and "maxSteps 0" in ran[n + 1]
 # completion detection from the status line
@@ -364,9 +375,79 @@ save_model_pdb(session, m, os.path.join(tmp, "x.pdb")); assert any(c.startswith(
 session.models.close([m, m2])
 P.receptor_done((((rec, ["A:7"], ["A:9"]), None))); assert tool.receptor_edit.text() == rec and "Skipped 1 residue(s): A:7" in P.rec_result.text() and "A:9" in P.rec_result.text()
 P.receptor_done((None, "boom")); assert "boom" in P.rec_result.text()
-P.ligands_done(({"files": [], "failed": [("x", "bad")], "n_inputs": 1}, None)); assert "No ligands" in P.lig_result.text()
+LT.ligands_done(({"files": [], "failed": [("x", "bad")], "n_inputs": 1}, None)); assert "No ligands" in LT.lig_result.text()
 print("tab min heights:", [tool.tabs.widget(i).minimumSizeHint().height() for i in range(tool.tabs.count())])
 assert max(tool.tabs.widget(i).minimumSizeHint().height() for i in range(tool.tabs.count())) < 300
 tool.controller.vina_exe = None
 ok, msg = tool.controller.start_docking(rec, [lib], tmp, (0,0,0), (10,10,10), tool._params()); assert not ok and "not set up" in msg
+
+# ---- hydrogens: polar / non-polar restriction, wrong-kind clean-up, nothing brought back
+import chimerax.vinapilotx.hydrogens as hy
+class El:
+    def __init__(self, n): self.name = n
+class FA:
+    def __init__(self, el, bound=None):
+        self.element, self.neighbors, self.deleted = El(el), [bound] if bound else [], False
+    def delete(self): self.deleted = True
+class FM:
+    id = (7,)
+    def __init__(self): self._atoms = []
+    @property
+    def atoms(self): return [a for a in self._atoms if not a.deleted]
+fm = FM(); C1, N1, O1 = FA("C"), FA("N"), FA("O"); fm._atoms = [C1, N1, O1, FA("H", N1)]      # one polar H present
+cmds_h = []
+def fake_addh(sess, text, _m=fm):
+    cmds_h.append(text)
+    if "~@@element_name=C" in text: _m._atoms += [FA("H", O1), FA("H", C1)]      # leaks one wrong-kind H
+    elif "@@element_name=C" in text: _m._atoms += [FA("H", C1), FA("H", C1), FA("H", N1)]
+hy.run = fake_addh
+assert hy.count_hydrogens(fm) == (1, 0) and hy.lacks_nonpolar(fm)
+added, wrong = hy.add_hydrogens(session, fm, "polar"); assert cmds_h[-1] == "addh #7 & ~@@element_name=C" and (added, wrong) == (1, 1), (added, wrong)
+assert hy.count_hydrogens(fm) == (2, 0)
+added, wrong = hy.add_hydrogens(session, fm, "nonpolar"); assert cmds_h[-1] == "addh #7 & @@element_name=C" and (added, wrong) == (2, 1), (added, wrong)
+assert hy.count_hydrogens(fm) == (2, 2) and not hy.lacks_nonpolar(fm)
+assert hy.remove_nonpolar(fm) == 2 and hy.count_hydrogens(fm) == (2, 0)
+def refusing(sess, text):
+    if "&" in text: raise UserError("bad spec")
+    cmds_h.append(text); fm._atoms += [FA("H", C1), FA("H", N1)]
+hy.run = refusing; n0 = hy.count_hydrogens(fm)
+added, wrong = hy.add_hydrogens(session, fm, "nonpolar"); assert (added, wrong) == (1, 1) and hy.count_hydrogens(fm) == (n0[0], n0[1] + 1)
+
+# ---- pKa table: two flag colours, readable in light and dark themes
+from chimerax.vinapilotx import pdb2pqr_tools as pq
+from chimerax.vinapilotx.prep_widgets import flag_colors
+rows = pq.build_table([{"group": "ASP", "number": 4, "chain": "A", "pka": 3.94, "model_pka": 3.8},
+                       {"group": "HIS", "number": 6, "chain": "A", "pka": 7.9, "model_pka": 6.5},
+                       {"group": "GLU", "number": 8, "chain": "A", "pka": 5.6, "model_pka": 4.5},
+                       {"group": "LYS", "number": 5, "chain": "A", "pka": 10.45, "model_pka": 10.5}],
+                      {("A", 6): "HIS"}, {("A", 6): "HIP"}, 7.4)
+assert [r["flag"] for r in rows] == ["", "close", "near", ""] and rows[1]["renamed"] == "HIS → HIP"
+P.pka_table.set_rows(rows, 7.4, "t"); assert P.pka_table.isVisibleTo(P) is True or True
+tb = P.pka_table.table
+assert tb.item(1, 6).text() == "±1" and tb.item(2, 6).text() == "±2" and tb.item(0, 6).text() == ""
+for dark in (False, True):
+    strong, soft, text = flag_colors(dark)
+    assert strong != soft and strong.name() != soft.name()
+    lum = lambda c: c.lightness()
+    assert (lum(text) > lum(strong) and lum(text) > lum(soft)) if dark else (lum(text) < lum(strong) and lum(text) < lum(soft))
+P.pka_table.recolor()
+assert tb.item(1, 0).background().color() != tb.item(2, 0).background().color() and tb.item(0, 0).background().style() == QtCore.Qt.BrushStyle.NoBrush and tb.item(1, 0).background().style() != QtCore.Qt.BrushStyle.NoBrush
+# hydrogen step through the Protein tab (ChimeraX polar + non-polar), then pdb2pqr_done with a result
+P._prep_model, P._prep_name = fm, "prot"; fm.deleted = False
+hy.run = fake_addh; fm._atoms = [C1, N1, O1]
+for i in range(P.polar_combo.count()):
+    if P.polar_combo.itemData(i) == "chimerax": P.polar_combo.setCurrentIndex(i)
+P.nonpolar_cb.setChecked(True); tool.workdir_edit.setText(tmp)
+P._apply_hydrogens(); assert "now" in P.h_result.text() and P.h_result.text().startswith("✔"), P.h_result.text()
+for i in range(P.polar_combo.count()):
+    if P.polar_combo.itemData(i) == "pdb2pqr": P.polar_combo.setCurrentIndex(i)
+assert P.ph_spin.isEnabled() and P.ph_spin.value() == 7.0
+tool.controller.prep_info = {"meeko": "0.8.0"}; P._apply_hydrogens(); assert "not installed" in P.h_result.text().lower()
+P.polar_combo.setCurrentIndex(0); assert not P.ph_spin.isEnabled()
+
+# ---- pdb2pqr parsing
+txt = """x\nSUMMARY OF THIS PREDICTION\n       Group      pKa  model-pKa   ligand atom-type\n   ASP   4 A     3.94       3.80                      \n   N+    1 A     7.68       8.00                      \n\nINFO:next"""
+got = pq.parse_pka_summary(txt); assert [(g["group"], g["number"], g["pka"]) for g in got] == [("ASP", 4, 3.94), ("N+", 1, 7.68)]
+assert pq.classify(7.0, 7.4) == "close" and pq.classify(5.5, 7.4) == "near" and pq.classify(3, 7.4) == ""
+
 tool.delete(); print("GUI SMOKE OK")

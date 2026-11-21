@@ -109,20 +109,43 @@ class VinaPilotXTool(ToolInstance):
         self.tabs = QTabWidget()
         outer.addWidget(self.tabs)
         self.tabs.addTab(_scrolled(self._build_settings_tab()), "1 Settings")
-        from .prepare_tab import PrepareTab
-        self.prepare = PrepareTab(self.session, self.controller, self)
-        self.tabs.addTab(_scrolled(self.prepare), "2 Prepare")
-        self.tabs.addTab(_scrolled(self._build_inputs_tab()), "3 Inputs")
+        from .protein_tab import ProteinTab
+        from .ligand_tab import LigandTab
+        self.protein = ProteinTab(self.session, self.controller, self)
+        self.tabs.addTab(_scrolled(self.protein), "2 Protein")
+        self.ligands = LigandTab(self.session, self.controller, self)
+        self.tabs.addTab(_scrolled(self.ligands), "3 Ligands")
+        self.tabs.addTab(_scrolled(self._build_inputs_tab()), "4 Inputs")
         self.box_panel = BoxPanel(self.session)
-        self.tabs.addTab(self.box_panel, "4 Box")
-        self.tabs.addTab(_scrolled(self._build_run_tab()), "5 Run")
-        self.tabs.addTab(_scrolled(self._build_results_tab()), "6 Results")
+        self.tabs.addTab(self.box_panel, "5 Box")
+        self.tabs.addTab(_scrolled(self._build_run_tab()), "6 Run")
+        self.tabs.addTab(_scrolled(self._build_results_tab()), "7 Results")
         self.tabs.currentChanged.connect(self._tab_changed)
 
     # ---- Settings ----------------------------------------------------
     def _build_settings_tab(self):
         w = QWidget()
         lay = QVBoxLayout(w)
+        g = QGroupBox("Setup folder")
+        gl = QVBoxLayout(g)
+        self.setup_edit = QLineEdit()
+        self.setup_edit.setText(self.controller.setup_dir)
+        self.setup_edit.setToolTip("Vina, Meeko and PDB2PQR are downloaded and installed inside this folder.")
+        self.setup_edit.editingFinished.connect(self._setup_dir_edited)
+        row, _ = _row_with_browse(self.setup_edit, "Browse…", self._browse_setup)
+        gl.addLayout(row)
+        n = QLabel("Everything the tool installs goes into this folder. To uninstall, delete the folder. "
+                   "Keep the path short: micromamba fails on very long paths (Windows allows 260 characters). "
+                   "A change applies to new installs.")
+        n.setWordWrap(True)
+        gl.addWidget(n)
+        self.setup_warn = QLabel("")
+        self.setup_warn.setWordWrap(True)
+        self.setup_warn.setStyleSheet(WARN_STYLE)
+        gl.addWidget(self.setup_warn)
+        lay.addWidget(g)
+        self._check_setup_len()
+
         g = QGroupBox("AutoDock Vina program")
         gl = QVBoxLayout(g)
         self.vina_status = QLabel("")
@@ -213,6 +236,20 @@ class VinaPilotXTool(ToolInstance):
         self.env_log.setMinimumHeight(90)
         gl.addWidget(self.env_log)
         lay.addWidget(g)
+
+        g = QGroupBox("Protonation states (PDB2PQR + PROPKA)")
+        gl = QVBoxLayout(g)
+        self.pq_status = QLabel("")
+        self.pq_status.setWordWrap(True)
+        gl.addWidget(self.pq_status)
+        row = QHBoxLayout()
+        self.pq_install_btn = QPushButton("Install PDB2PQR")
+        self.pq_install_btn.setToolTip("Installs PDB2PQR (with PROPKA) into the Meeko environment. Set up Meeko first.")
+        self.pq_install_btn.clicked.connect(self.controller.install_pdb2pqr)
+        row.addWidget(self.pq_install_btn)
+        row.addStretch(1)
+        gl.addLayout(row)
+        lay.addWidget(g)
         self._refresh_env_status()
 
         from .pose_viewer import DEFAULT_COLORS
@@ -251,13 +288,40 @@ class VinaPilotXTool(ToolInstance):
         else:
             self.env_status.setText("✘ " + (c.prep_message or "Not set up. Meeko prepares receptors and ligands."))
             self.env_status.setStyleSheet(BAD_STYLE)
+        if c.pdb2pqr_ok:
+            self.pq_status.setText("✔ PDB2PQR %s ready." % c.prep_info.get("pdb2pqr"))
+            self.pq_status.setStyleSheet(OK_STYLE)
+        else:
+            self.pq_status.setText("✘ Not installed." if c.prep_ok else "✘ Set up Meeko first.")
+            self.pq_status.setStyleSheet(BAD_STYLE)
+
+    def _browse_setup(self):
+        d = QFileDialog.getExistingDirectory(self.tool_window.ui_area, "Select the setup folder", self.setup_edit.text())
+        if d:
+            self.setup_edit.setText(d)
+            self._setup_dir_edited()
+
+    def _setup_dir_edited(self):
+        ok, info = self.controller.set_setup_dir(self.setup_edit.text())
+        if ok:
+            self.setup_edit.setText(info)
+        self._check_setup_len(None if ok else info)
+
+    def _check_setup_len(self, error=None):
+        text = error or ""
+        if not error and os.name == "nt" and len(self.setup_edit.text()) > 25:
+            text = "This path is long. micromamba may fail on Windows; a short folder such as C:\\vpx is safer."
+        self.setup_warn.setText(text)
+        self.setup_warn.setVisible(bool(text))
 
     def _prep_busy_changed(self, busy):
         self.env_bar.setVisible(busy)
         self.env_cancel_btn.setVisible(busy)
         for b in (self.env_setup_btn, self.env_existing_btn, self.env_verify_btn, self.env_remove_btn):
             b.setEnabled(not busy)
-        self.prepare.set_busy(busy)
+        self.protein.set_busy(busy)
+        self.ligands.set_busy(busy)
+        self.pq_install_btn.setEnabled(not busy)
 
     def _use_existing_python(self):
         p, _ = QFileDialog.getOpenFileName(self.tool_window.ui_area, "Select python (or python.exe)", "",
@@ -722,7 +786,7 @@ class VinaPilotXTool(ToolInstance):
         if box is None:
             QMessageBox.warning(self.tool_window.ui_area, "Lattice VinaPilotX",
                                 "There is no search box yet. Create one on the Box tab first.")
-            self.tabs.setCurrentIndex(3)
+            self.tabs.setCurrentIndex(4)
             return
         center, size = box
         receptor = self.receptor_edit.text().strip().strip('"')
@@ -736,7 +800,7 @@ class VinaPilotXTool(ToolInstance):
             return
         self._save_settings()
         self.activity.clear()
-        self.tabs.setCurrentIndex(4)
+        self.tabs.setCurrentIndex(5)
 
     def _open_workdir(self):
         d = self.workdir_edit.text().strip()
@@ -755,10 +819,10 @@ class VinaPilotXTool(ToolInstance):
             self.box_summary.setStyleSheet("")
 
     def _tab_changed(self, index):
-        if index == 4:
+        if index == 5:
             self._update_box_summary()
         elif index == 1:
-            self.prepare.refresh_models()
+            self.protein.refresh_models()
 
     # per-ligand progress bars ("slots")
     def _make_slots(self, n):
@@ -887,24 +951,30 @@ class VinaPilotXTool(ToolInstance):
             self.counter_label.setText("Ligands completed: %d / %d" % (done, total))
         elif event == "log":
             self.activity.appendPlainText(str(payload))
-        elif event == "prep_log":
-            self.prepare.log_line(payload)
+        elif event == "setup_log":
             self.env_log.appendPlainText(str(payload))
+        elif event == "protein_log":
+            self.protein.log_line(payload)
+        elif event == "ligand_log":
+            self.ligands.log_line(payload)
         elif event == "prep_busy":
             self._prep_busy_changed(bool(payload))
         elif event == "prep_env":
-            self.prepare.refresh_env()
+            self.protein.refresh_env()
+            self.ligands.refresh_env()
             self._refresh_env_status()
         elif event == "prep_progress":
-            self.prepare.progress(payload)
+            self.ligands.progress(payload)
         elif event == "prep_receptor_done":
-            self.prepare.receptor_done(payload)
+            self.protein.receptor_done(payload)
+        elif event == "pdb2pqr_done":
+            self.protein.pdb2pqr_done(payload)
         elif event == "prep_ligands_done":
-            self.prepare.ligands_done(payload)
+            self.ligands.ligands_done(payload)
         elif event == "finished":
             self.run_status.setText("Finished. Results are in %s" % payload.workdir)
             self.results.sort_by_best()
-            self.tabs.setCurrentIndex(5)
+            self.tabs.setCurrentIndex(6)
             self.run_btn.setEnabled(True); self.cancel_btn.setEnabled(False)
 
     # ------------------------------------------------------------ plumbing

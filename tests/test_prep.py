@@ -133,3 +133,85 @@ def test_strip_hydrogens_and_residue_atoms(tmp_path):
     assert prep.strip_hydrogens(str(src), str(out), ["A:7"]) == 2
     kept = [l[12:16].strip() for l in out.read_text().splitlines()]
     assert kept == ["N", "CA", "N", "H"]      # residue 8 keeps its hydrogen
+
+
+# ------------------------------------------------------------------------------ PDB2PQR
+from ldsrc import pdb2pqr_tools as pq
+
+SUMMARY = """junk
+SUMMARY OF THIS PREDICTION
+       Group      pKa  model-pKa   ligand atom-type
+   ASP   4 A     3.94       3.80                      
+   HIS   6 A     6.31       6.50                      
+   C-   12 A     3.30       3.20                      
+   N+    1 B     7.68       8.00                      
+
+INFO:PROPKA information:
+   LYS   9 A    10.00      10.50
+"""
+
+
+def test_pdb2pqr_summary_and_flags():
+    rows = pq.parse_pka_summary(SUMMARY)
+    assert [(r["group"], r["number"], r["chain"]) for r in rows] == [("ASP", 4, "A"), ("HIS", 6, "A"), ("C-", 12, "A"), ("N+", 1, "B")]
+    assert pq.classify(6.4, 7.4) == "close" and pq.classify(8.4, 7.4) == "close" and pq.classify(6.39, 7.4) == "near"
+    assert pq.classify(5.4, 7.4) == "near" and pq.classify(9.4, 7.4) == "near" and pq.classify(5.39, 7.4) == "" and pq.classify(9.5, 7.4) == ""
+    t = pq.build_table(rows, {("A", 6): "HIS"}, {("A", 6): "HID"}, 7.4)
+    assert t[1]["renamed"] == "HIS → HID" and t[3]["residue"].startswith("N-terminus") and t[2]["predicted"] == "deprotonated"
+
+
+
+def test_pdb2pqr_args_and_hydrogen_strip(tmp_path):
+    a = pq.pdb2pqr_args(7.4, "o.pdb", "o.pqr", "i.pdb")
+    assert a[:4] == ["--ff", "AMBER", "--ffout", "AMBER"] and "--with-ph" in a and a[a.index("--with-ph") + 1] == "7.4" and a[-2:] == ["i.pdb", "o.pqr"]
+    src = tmp_path / "a.pdb"
+    src.write_text("ATOM      1  N   ALA A   1       0.0   0.0   0.0  1.00  0.00           N  \n"
+                   "ATOM      2  H   ALA A   1       0.0   0.0   1.0  1.00  0.00           H  \n"
+                   "ATOM      3 1HB  ALA A   1       0.0   0.0   2.0  1.00  0.00           H  \n"
+                   "HETATM    4 HG    HG A   2       0.0   0.0   3.0  1.00  0.00          HG  \n"
+                   "ATOM      5  CA  ALA A   1       0.0   0.0   4.0  1.00  0.00           C  \n")
+    n = pq.strip_all_hydrogens(str(src), str(tmp_path / "b.pdb"))
+    kept = (tmp_path / "b.pdb").read_text().splitlines()
+    assert n == 2 and len(kept) == 3 and any(" HG " in k for k in kept)      # mercury is not a hydrogen
+    assert pq.residue_names(str(tmp_path / "b.pdb")) == {("A", 1): "ALA", ("A", 2): "HG"}
+
+
+def test_setup_dir_layout(tmp_path, monkeypatch):
+    import ldsrc.controller as ctl
+    monkeypatch.setattr(ctl, "data_dir", lambda: str(tmp_path / "data"))
+    os.makedirs(tmp_path / "data")
+    c = ctl.DockingController.__new__(ctl.DockingController)
+    c.settings = ctl.Settings(str(tmp_path / "s.json"))
+    assert c.setup_dir == ctl.default_setup_dir()
+    ok, path = c.set_setup_dir(str(tmp_path / "vpx"))
+    assert ok and c.setup_dir == str(tmp_path / "vpx") and c.vina_root == str(tmp_path / "vpx" / "vina") and c.prep_dir == str(tmp_path / "vpx" / "meeko")
+    assert not c.set_setup_dir(str(tmp_path / "s.json" / "x"))[0]
+
+
+@pytest.mark.skipif(not REAL, reason="set VPX_TEST_PYTHON to a Python that has Meeko + RDKit")
+def test_real_pdb2pqr_pipeline(tmp_path):
+    env = pe.external_env(REAL)
+    info = pe.probe(env)["info"]
+    if not info.get("pdb2pqr"):
+        pytest.skip("pdb2pqr is not installed in VPX_TEST_PYTHON")
+    gen = """
+import sys
+from rdkit import Chem
+from rdkit.Chem import AllChem
+m = Chem.AddHs(Chem.MolFromSequence("AGSDKHFEYCNQ"), addResidueInfo=True)
+ps = AllChem.ETKDGv3(); ps.useRandomCoords = True; ps.randomSeed = 3; AllChem.EmbedMolecule(m, ps)
+Chem.MolToPDBFile(m, sys.argv[1])
+"""
+    g = tmp_path / "gen.py"; g.write_text(gen)
+    pdb = tmp_path / "with_h.pdb"
+    assert pe.run_stream(env.python_command([str(g), str(pdb)]), env=env.environ()) == 0
+    logs = []
+    r = pq.run_pdb2pqr(env, str(pdb), str(tmp_path / "out"), "pep", 7.4, log=logs.append)       # input has hydrogens: stripped first
+    assert os.path.isfile(r["pdb"]) and os.path.isfile(r["log_path"]) and os.path.isfile(r["csv_path"])
+    groups = {t["residue"] for t in r["table"]}
+    assert any(g.startswith("HIS") for g in groups) and any(g.startswith("ASP") for g in groups)
+    his = [t for t in r["table"] if t["residue"].startswith("HIS")][0]
+    assert his["renamed"].startswith("HIS →") or pq.residue_names(r["pdb"])[("A", 6)] in ("HID", "HIE", "HIP")
+    low = pq.run_pdb2pqr(env, str(pdb), str(tmp_path / "low"), "pep", 3.0)                     # pH changes the states
+    assert pq.residue_names(low["pdb"])[("A", 6)] == "HIP" and any(n.startswith("ASP") for n in [x.split(":")[0] for x in low["renamed"]]) is not None
+    assert "ASH" in set(pq.residue_names(low["pdb"]).values()) or "GLH" in set(pq.residue_names(low["pdb"]).values())

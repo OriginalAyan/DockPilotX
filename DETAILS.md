@@ -2,11 +2,11 @@
 
 Lattice VinaPilotX runs **AutoDock Vina** from inside UCSF ChimeraX. It takes a prepared receptor and prepared ligands (PDBQT), lets you define the search box on the structure, runs single or batch docking, and collects the results. This page explains every feature and how it works. (Working name; the tool is not yet final-named.)
 
-> Inputs for docking are `.pdbqt` files. The **Prepare** tab can make them from PDB/mmCIF (receptor) and SDF/MOL/MOL2/SMILES (ligands) with Meeko.
+> Inputs for docking are `.pdbqt` files. The **Protein** and **Ligands** tabs can make them from PDB/mmCIF (receptor) and SDF/MOL/MOL2/SMILES (ligands) with Meeko.
 
 ## Highlights
 
-- One window, six tabs: **Settings → Prepare → Inputs → Box → Run → Results**.
+- One window, seven tabs: **Settings → Protein → Ligands → Inputs → Box → Run → Results**.
 - **Meeko preparation** in a private environment (micromamba, with a venv + pip fallback) set up from the Settings tab; receptor cleaning is done in ChimeraX.
 - Finds your Vina, or **downloads the official Vina** for your OS/CPU and verifies it.
 - Receptor opens in the scene when selected; other models are hidden to avoid clashes.
@@ -27,11 +27,14 @@ Lattice VinaPilotX runs **AutoDock Vina** from inside UCSF ChimeraX. It takes a 
 Lattice VinaPilotX does not contain Vina and installs nothing into ChimeraX; it starts Vina as a separate process.
 
 - **Browse / Verify**: you can point at `vina.exe` (or `vina`) or at the folder containing it. If you give a folder, files named `vina*` are considered (never `vina_split*`), newest version first. The file is test-run with `--version`; the reported version is shown. The choice is remembered.
-- **Download latest Vina**: looks up the newest release through the GitHub API (falls back to the `/releases/latest` redirect, then to a built-in version number). It picks the asset for your platform — `vina_<ver>_win.exe`, `vina_<ver>_mac_x86_64`, `vina_<ver>_mac_aarch64`, `vina_<ver>_linux_x86_64`, `vina_<ver>_linux_aarch64` — downloads it to a `.part` file, checks the SHA-256 when GitHub supplies one, makes it executable, test-runs `--version`, and only then keeps it. Failed or cancelled downloads leave no partial file. Downloads are stored in ChimeraX's user-data folder under `VinaPilotX/vina/`.
+- **Download latest Vina**: looks up the newest release through the GitHub API (falls back to the `/releases/latest` redirect, then to a built-in version number). It picks the asset for your platform — `vina_<ver>_win.exe`, `vina_<ver>_mac_x86_64`, `vina_<ver>_mac_aarch64`, `vina_<ver>_linux_x86_64`, `vina_<ver>_linux_aarch64` — downloads it to a `.part` file, checks the SHA-256 when GitHub supplies one, makes it executable, test-runs `--version`, and only then keeps it. Failed or cancelled downloads leave no partial file. Downloads are stored in the setup folder under `vina/`.
 - On startup, a remembered path is used; otherwise Lattice VinaPilotX looks for `vina` on `PATH` and for earlier downloads.
 
+### Setup folder
+Everything the tool installs (Vina, the Meeko environment, PDB2PQR) lives in one folder. **To uninstall, delete the folder.** The default is short (`<drive>:\vpx` on Windows, otherwise a folder in ChimeraX's user-data directory), because micromamba fails on very long paths (Windows allows 260 characters) and the tool warns about long ones. A changed folder applies to new installs; things already installed keep working where they are. Each of Settings, Protein and Ligands has its **own log**: setup output never appears in the preparation logs.
+
 ### Working directory
-All outputs of a run go here (layout in section 6). The folder is created if missing.
+All outputs of a run go here (layout in section 8). The folder is created if missing.
 
 ### Opening PDBQT files automatically
 Some ChimeraX installs associate the `.pdbqt` suffix with a format called **PDBT**. Plain `open file.pdbqt` (menu, drag-and-drop, double-click) then fails with *"Install the Vinardock bundle to open PDBT format files"*, and the file can only be opened through ViewDock or with `open file.pdbqt format pdbqt`.
@@ -52,23 +55,32 @@ Meeko and RDKit are installed in a private environment, never into ChimeraX. Eve
 - **Set up Meeko** with *Automatic*: downloads the official **micromamba** program (GitHub releases, then micro.mamba.pm), creates a conda-forge environment (`python 3.11, meeko, rdkit, scipy, numpy, gemmi, prody`) and checks it. If that fails, it falls back to a **venv + pip** environment (system Python first, then the Python shipped with ChimeraX; ProDy is optional there). You can also force one of the two methods.
 - **Use existing Python…** uses a Python that already has Meeko and RDKit (a conda or venv Python; nothing is installed).
 - **Verify** re-checks the environment (Meeko version, RDKit, ProDy). **Remove** deletes an environment this tool created.
-- The environment lives in ChimeraX's user-data folder under `VinaPilotX/prep/` and is remembered between sessions. Progress and pip/micromamba output are shown in the log box.
+- The environment lives in the setup folder (`meeko/`, or `meeko_venv/` for the fallback) and is remembered between sessions. Progress and pip/micromamba output are shown in the log box.
 - Meeko's command-line options changed between versions, so the tool reads `--help` of the installed Meeko and adapts (e.g. `--read_with_prody` / `--read_pdb` / `-i`, `--delete_bad_res` / `--allow_bad_res`).
 
 ---
 
-## 2. Prepare tab (receptor and ligands)
+### PDB2PQR + PROPKA (Settings, below Meeko)
+**Install PDB2PQR** runs `pip install pdb2pqr` in the Meeko environment (set up Meeko first), then re-checks Meeko. It is only needed for the PDB2PQR hydrogen mode.
 
-### Receptor (PDB / mmCIF → PDBQT): three steps
-Pick a file or an already open model (a copy is used; your model is never changed).
+## 2. Protein tab (PDB / mmCIF → PDBQT)
 
-1. **Clean receptor** opens a copy as `<name>_prep` and keeps it in the scene. It uses ChimeraX **Dock Prep** with its own option names: *Delete solvent*, *Delete non-complexed ions*, *Delete non-current alternate locations*, *Delete residues with incomplete backbones* (off by default), *"Standardize" certain residue types* (MSE, 5BU, UMS, CSL), *Incomplete side chains* (replace using a rotamer library, or change to Ala/Gly) and *Add hydrogens*. Chains and *Delete other ligands / cofactors* (everything that is not protein, nucleic acid, water or ions) are removed with `delete`. *Add charges* and *Write Mol2 file* are left out because Meeko computes its own charges.
-   - **Add hydrogens** (on by default) runs Dock Prep's hydrogen addition. With **Only if the structure has none** checked (default), a structure that already contains hydrogens is left alone, so protonation you set earlier (`HID`/`HIE`/`HIP`, `ASH`, `GLH`, `LYN`, `CYM`) is never changed. Unchecked, Dock Prep also adds hydrogens that are missing from a partly protonated structure. *Add hydrogens* unchecked adds none.
-   - Meeko does **not** need hydrogens in its input: it adds the polar hydrogens from the residue names itself (histidines get its default state unless named `HID`/`HIE`/`HIP`). ChimeraX's hydrogens are optional but pick histidine states from the surroundings.
-2. **Minimize (optional)** runs ChimeraX `minimize … dockPrep false maxSteps N logEnergy true` on the copy (default 100 steps; "until convergence" is slow and not recommended). Energies are written to the ChimeraX Log. The tool listens to ChimeraX's status line and, when it sees the minimization finish, writes **Minimization completed (final energy …)** to the Log and shows it in the tool; the button is a **Stop** button while it runs. Dock Prep is not repeated, so hydrogens and protonation stay as they are. Standard residues use the force field's own charges, so no extra charges are needed unless non-standard residues or cofactors remain. *Completion is detected from ChimeraX's status text; if a future ChimeraX words it differently, press Stop and continue to step 3.*
-3. **Convert with Meeko** saves the copy as `prepared/receptor/<name>_clean.pdb`, runs `mk_prepare_receptor -o <name> -p` and writes `prepared/receptor/<name>.pdbqt`. If a residue matches no Meeko template, it is retried **without its hydrogens** (Meeko then adds standard ones); residues that still fail are skipped (*Skip residues Meeko cannot handle*) and listed, because a skipped residue is missing from the receptor. The result is placed in the receptor field of the Inputs tab.
+Pick a file or an already open model (a copy is used; your model is never changed). Steps:
 
-### Ligands (SDF / MOL / MOL2 / SMILES → PDBQT)
+1. **Clean (Dock Prep)** opens a copy as `<name>_prep` and keeps it in the scene. It uses ChimeraX **Dock Prep** with its own option names: *Delete solvent*, *Delete non-complexed ions*, *Delete non-current alternate locations*, *Delete residues with incomplete backbones* (off by default), *"Standardize" certain residue types* (MSE, 5BU, UMS, CSL) and *Incomplete side chains* (replace using a rotamer library, or change to Ala/Gly). Chains and *Delete other ligands / cofactors* (everything that is not protein, nucleic acid, water or ions) are removed with `delete`. Dock Prep adds **no hydrogens** here (`ah false`); *Add charges* and *Write Mol2 file* are left out because Meeko computes its own charges.
+2. **Hydrogens** has two independent choices:
+   - **Polar hydrogens (protonation states)**, the ones on N, O, S:
+     - *Keep as in the file*: none are added; the ones in the file stay as they are.
+     - *ChimeraX*: `addh` restricted to non-carbon atoms. Residue names are used (HID/HIE/HIP, ASH, GLH, LYN, CYM); plain HIS is decided from hydrogen bonds; other residues get their usual pH ~7 state (Asp/Glu negative, Lys/Arg positive, Cys/Tyr neutral). There is no pKa calculation and no flipping of Asn/Gln/His.
+     - *PDB2PQR + PROPKA at pH [number box]*: the hydrogens of the copy are removed, then `pdb2pqr --ff AMBER --ffout AMBER --titration-state-method propka --with-ph <pH> --keep-chain` predicts pKa values, sets states by comparing them with the pH you enter (default 7.0), adds hydrogens, optimizes the hydrogen-bond network (including Asn/Gln/His flips) and writes AMBER-style residue names (HID/HIE/HIP, ASH, GLH, LYN, CYM). The result replaces the copy in the scene; its carbon hydrogens are removed again so that "polar" and "non-polar" stay separate. PDB2PQR debumps clashes, which can move atoms slightly: minimizing afterwards is sensible.
+   - **Add non-polar hydrogens (on carbon)**: `addh` restricted to carbon atoms; afterwards any hydrogen of the wrong kind that slipped in is deleted. A polar hydrogen you removed by hand is therefore never brought back. Docking does not need these (Meeko merges non-polar hydrogens); minimization does.
+   - Meeko does **not** need hydrogens in its input: it adds polar hydrogens itself from the residue names. Choosing a mode here matters when you want specific protonation states, or a minimized structure.
+   - **pKa table (PDB2PQR mode).** Shown in the tab, logged, and saved with the PDB2PQR log in `prepared/receptor/pdb2pqr/` (`<name>_pdb2pqr.log`, `<name>_pka.csv`). Columns: residue, pKa, model pKa, pKa − pH, predicted state, residue name applied, check. Rows whose pKa is within **±1** of the pH get a strong colour, within **±2** a soft one (red-orange vs yellow; dark fills with white text in the dark theme, light fills with black text in the light theme; the Check column says ±1 / ±2 as well). PROPKA is accurate to about one pKa unit (about 78-81 % of predictions within 1 unit, about half within 0.5 in a [published benchmark](https://pmc.ncbi.nlm.nih.gov/articles/PMC1513386/)), so **manual verification may be needed where the pKa is close to the pH**. The states are applied as PDB2PQR returns them; the ±1 / ±2 bands are this tool's convention, not a published rule.
+   - Not offered: PDB2PQR's neutral N-/C-terminus options (they need the PARSE force field). For a chain cut from a larger protein, the ChimeraX mode treats ends it can tell are artificial as non-terminal when the file has SEQRES.
+3. **Minimize (optional)** runs ChimeraX `minimize … dockPrep false maxSteps N logEnergy true` on the copy (default 100 steps; "until convergence" is slow and not recommended). Energies are written to the ChimeraX Log. The tool listens to ChimeraX's status line and, when it sees the minimization finish, writes **Minimization completed (final energy …)** to the Log and shows it in the tool; the button is a **Stop** button while it runs. Dock Prep is not repeated, so hydrogens and protonation stay as they are. Minimization works best with all hydrogens (the tool says so if non-polar ones are missing). Standard residues use the force field's own charges. *Completion is detected from ChimeraX's status text; if a future ChimeraX words it differently, press Stop and continue to step 4.*
+4. **Convert with Meeko** saves the copy as `prepared/receptor/<name>_clean.pdb`, runs `mk_prepare_receptor -o <name> -p` and writes `prepared/receptor/<name>.pdbqt`. If a residue matches no Meeko template, it is retried **without its hydrogens** (Meeko then adds standard ones); residues that still fail are skipped (*Skip residues Meeko cannot handle*) and listed, because a skipped residue is missing from the receptor. The result is placed in the receptor field of the Inputs tab.
+
+## 3. Ligands tab (SDF / MOL / MOL2 / SMILES → PDBQT)
 1. Add files or folders (sub-folders included). `.smi` files are lines of `SMILES name`.
 2. **RDKit staging**: molecules without hydrogens, or with flat 2D coordinates, get hydrogens and a 3D conformer (ETKDG + MMFF); molecules that already have 3D coordinates and hydrogens are used as they are. Protonation states are **not** changed. Names come from the SDF title/`_Name` or the file name; duplicate names get `_2`, `_3` …; unreadable molecules are listed as skipped.
 3. **Meeko**: `mk_prepare_ligand` writes one PDBQT per molecule to `prepared/ligands/` (Gasteiger charges, Meeko's defaults).
@@ -76,7 +88,7 @@ Pick a file or an already open model (a copy is used; your model is never change
 
 ---
 
-## 3. Inputs tab
+## 4. Inputs tab
 
 ### Receptor
 Select a prepared receptor `.pdbqt`. It is checked and then opened in the scene:
@@ -110,7 +122,7 @@ Add files, add a folder (optionally with sub-folders), or add library files that
 
 ---
 
-## 4. Box tab
+## 5. Box tab
 
 The search space is Vina's `center_x/y/z` and `size_x/y/z` in Å. Center and size are two columns (X, Y, Z rows); if the panel is too narrow it scrolls sideways.
 
@@ -129,7 +141,7 @@ The box editor is derived from the standalone ChimeraX Vina Grid Box bundle (sam
 
 ---
 
-## 5. Run tab
+## 6. Run tab
 
 ### Settings
 | Setting | Default | Notes |
@@ -164,7 +176,7 @@ If a ligand already has a result and a log in the working folder, it is reused (
 
 ---
 
-## 6. Results tab
+## 7. Results tab
 
 - **Expandable tree.** One row per ligand (best affinity, number of poses, seed, status, best rating). Expand it to list every pose: affinity, RMSD l.b., RMSD u.b., rating, H-bonds, clashes. Poses stay in pose order when you sort; ligand rows sort by any column.
 - **Instant display.** A ligand's whole Vina output (all poses) is opened once as one model, so its poses appear as sub-models (e.g. #3.1, #3.2 …). Selecting a pose shows that sub-model and hides the others, so clicking through poses is instant. At most *Max ligand files kept open* (default 5) stay loaded; opening another closes the least recently used one. The receptor is opened once and reused.
@@ -178,10 +190,11 @@ If a ligand already has a result and a log in the working folder, it is reused (
 
 ---
 
-## 7. Files written to the working directory
+## 8. Files written to the working directory
 
 ```
-prepared/receptor/         cleaned PDB and Meeko receptor PDBQT (Prepare tab)
+prepared/receptor/         cleaned PDB and Meeko receptor PDBQT (Protein tab)
+prepared/receptor/pdb2pqr/ PDB2PQR output, log and pKa table (PDB2PQR mode)
 prepared/ligands/          Meeko ligand PDBQT files; prepared/staging/ holds the RDKit SDFs
 receptor/<name>.pdbqt      copy of the receptor used
 ligands/<name>.pdbqt       one file per ligand (libraries split)
@@ -202,7 +215,7 @@ manifest.json              tool/Vina versions, receptor, box, parameters, seed p
 ---
 
 ## Known limits
-- Docking inputs must be PDBQT; the Prepare tab creates them. Ligand protonation states are not assigned; flexible/covalent receptor options of Meeko are not exposed yet.
+- Docking inputs must be PDBQT; the Protein and Ligands tabs create them. Ligand protonation states are not assigned (receptor states can be set with PDB2PQR); flexible/covalent receptor options of Meeko are not exposed yet.
 - Resume does not detect changed receptor/box/parameters.
 - Ligand dimensions describe the stored conformation only.
 - Progress-bar smoothness depends on Vina's output buffering.

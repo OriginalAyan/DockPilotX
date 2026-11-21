@@ -10,7 +10,7 @@ import threading
 
 import shutil
 
-from . import vina_manager, docking, prep, prep_env
+from . import vina_manager, docking, prep, prep_env, pdb2pqr_tools
 from .docking import DockingParams, DockingRunner
 
 APP_NAME = "VinaPilotX"
@@ -26,6 +26,15 @@ def data_dir():
     path = os.path.join(base, APP_NAME)
     os.makedirs(path, exist_ok=True)
     return path
+
+
+def default_setup_dir():
+    """Default folder for everything the tool installs (Vina, Meeko, PDB2PQR). Short on Windows, because
+    conda packages nest deeply and Windows limits paths to 260 characters."""
+    if os.name == "nt":
+        local = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+        return os.path.splitdrive(local)[0] + "\\vpx"
+    return os.path.join(data_dir(), "setup")
 
 
 class Settings:
@@ -85,7 +94,7 @@ class DockingController:
         if saved:
             self.set_vina(saved, quiet=True)
         else:
-            found = vina_manager.find_vina_on_system([os.path.join(data_dir(), "vina")])
+            found = vina_manager.find_vina_on_system([self.vina_root, os.path.join(data_dir(), "vina")])
             if not found:
                 found = self._find_downloaded()
             if found:
@@ -120,11 +129,36 @@ class DockingController:
 
     # ---- Meeko preparation environment ---------------------------------------
     @property
-    def prep_dir(self):
-        return os.path.join(data_dir(), "prep")
+    def setup_dir(self):
+        """Folder that holds everything installed by this tool; delete it to uninstall."""
+        return self.settings.get("setup_dir") or default_setup_dir()
 
-    def _prep_log(self, line):
-        self.session.ui.thread_safe(self._emit, "prep_log", line)
+    def set_setup_dir(self, path):
+        path = os.path.abspath(os.path.expanduser(str(path).strip().strip('"')))
+        try:
+            os.makedirs(path, exist_ok=True)
+        except OSError as err:
+            return False, "Cannot use that folder: %s" % err
+        self.settings.set("setup_dir", path)
+        return True, path
+
+    @property
+    def vina_root(self):
+        return os.path.join(self.setup_dir, "vina")
+
+    @property
+    def prep_dir(self):
+        return os.path.join(self.setup_dir, "meeko")
+
+    @property
+    def pdb2pqr_ok(self):
+        return bool(self.prep_ok and self.prep_info.get("pdb2pqr"))
+
+    def _channel_log(self, channel):
+        """Log function for one place: 'setup' (Settings tab), 'protein' or 'ligand' (their own tabs)."""
+        def log(line):
+            self.session.ui.thread_safe(self._emit, channel + "_log", line)
+        return log
 
     def _prep_set_busy(self, busy):
         self.prep_busy = busy
@@ -168,7 +202,7 @@ class DockingController:
         env = self.prep_env
 
         def work():
-            return prep_env.probe(env, repair=True, log=self._prep_log, cancelled=self._prep_cancel.is_set)
+            return prep_env.probe(env, repair=True, log=self._channel_log("setup"), cancelled=self._prep_cancel.is_set)
 
         def done(res, err):
             self._prep_apply(res if res else {"ok": False, "message": err or "failed", "info": {}})
@@ -179,11 +213,11 @@ class DockingController:
         base_dir = self.prep_dir
 
         def work():
-            log, cancelled = self._prep_log, self._prep_cancel.is_set
+            log, cancelled = self._channel_log("setup"), self._prep_cancel.is_set
             env, errors, mm_base = None, [], None
             if method in ("auto", "micromamba"):
                 try:
-                    mm_base = prep_env.short_base_dir(os.path.join(base_dir, "micromamba"))
+                    mm_base = base_dir
                     env = prep_env.create_micromamba_env(mm_base, log, cancelled)
                     res = prep_env.probe(env, repair=True, log=log, cancelled=cancelled)
                     if not res["ok"]:
@@ -199,7 +233,7 @@ class DockingController:
                     if method == "auto":
                         log("Trying the venv + pip fallback ...")
             if env is None and method in ("auto", "venv"):
-                env = prep_env.create_venv_env(base_dir, log, cancelled)
+                env = prep_env.create_venv_env(os.path.join(os.path.dirname(base_dir), "meeko_venv"), log, cancelled)
             if env is None:
                 raise prep_env.PrepError("; ".join(errors) or "Setup failed.")
             return env, prep_env.probe(env, repair=True, log=log, cancelled=cancelled)
@@ -240,10 +274,11 @@ class DockingController:
         env = self.prep_env
         target = None
         if env is not None and env.prefix:
-            if env.kind == "micromamba" and os.path.basename(os.path.dirname(env.prefix)) in ("mm", "micromamba"):
-                target = os.path.dirname(env.prefix)
+            top = os.path.dirname(env.prefix)
+            if env.kind == "micromamba" and os.path.basename(top) in ("meeko", "mm", "micromamba"):
+                target = top
             elif env.kind == "venv" and os.path.basename(env.prefix) == "venv":
-                target = env.prefix
+                target = top if os.path.basename(top) == "meeko_venv" else env.prefix
         if target:
             shutil.rmtree(target, ignore_errors=True)
         self.prep_env, self.prep_info = None, {}
@@ -251,12 +286,44 @@ class DockingController:
         self.settings.set("prep_info", {})
         self._prep_apply({"ok": False, "message": "No preparation environment is set up.", "info": {}})
 
+    # ---- PDB2PQR (installed into the same private environment) ----------------
+    def install_pdb2pqr(self):
+        env = self.prep_env
+
+        def work():
+            log, cancelled = self._channel_log("setup"), self._prep_cancel.is_set
+            prep_env.install_pdb2pqr(env, log, cancelled)
+            # the install may change shared packages, so check Meeko again as well
+            return prep_env.probe(env, repair=True, log=log, cancelled=cancelled)
+
+        def done(res, err):
+            if err:
+                self._channel_log("setup")("PDB2PQR setup failed: %s" % err)
+                self._emit("prep_env", {"ok": self.prep_ok, "message": self.prep_message, "info": self.prep_info})
+                return
+            self._prep_apply(res)
+        if env is None or not env.exists():
+            self._channel_log("setup")("Set up Meeko first: PDB2PQR is installed into the same private environment.")
+            return False
+        return self._prep_thread(work, done)
+
+    def run_pdb2pqr_async(self, in_pdb, out_dir, base, ph):
+        env = self.prep_env
+
+        def work():
+            return pdb2pqr_tools.run_pdb2pqr(env, in_pdb, out_dir, base, ph, log=self._channel_log("protein"),
+                                             cancelled=self._prep_cancel.is_set)
+
+        def done(res, err):
+            self._emit("pdb2pqr_done", (res, err))
+        return self._prep_thread(work, done)
+
     def prepare_receptor_async(self, clean_pdb, out_base, delete_bad=True):
         env, info = self.prep_env, self.prep_info
 
         def work():
             return prep.prepare_receptor(env, info, clean_pdb, out_base, delete_bad,
-                                         log=self._prep_log, cancelled=self._prep_cancel.is_set)
+                                         log=self._channel_log("protein"), cancelled=self._prep_cancel.is_set)
 
         def done(res, err):
             self._emit("prep_receptor_done", (res, err))
@@ -269,7 +336,7 @@ class DockingController:
             self.session.ui.thread_safe(self._emit, "prep_progress", (d, t))
 
         def work():
-            return prep.prepare_ligands(env, info, inputs, out_dir, stage_dir, add_h, log=self._prep_log,
+            return prep.prepare_ligands(env, info, inputs, out_dir, stage_dir, add_h, log=self._channel_log("ligand"),
                                         progress=progress, cancelled=self._prep_cancel.is_set)
 
         def done(res, err):
@@ -278,16 +345,16 @@ class DockingController:
 
     # ---- Vina -------------------------------------------------------------
     def _find_downloaded(self):
-        root = os.path.join(data_dir(), "vina")
-        if not os.path.isdir(root):
-            return None
         best = None
-        for d in os.listdir(root):
-            p = vina_manager.resolve_vina_path(os.path.join(root, d))
-            if p:
-                ver = vina_manager.version_tuple(vina_manager.parse_version(d) or "0")
-                if best is None or ver > best[0]:
-                    best = (ver, p)
+        for root in (self.vina_root, os.path.join(data_dir(), "vina")):
+            if not os.path.isdir(root):
+                continue
+            for d in os.listdir(root):
+                p = vina_manager.resolve_vina_path(os.path.join(root, d))
+                if p:
+                    ver = vina_manager.version_tuple(vina_manager.parse_version(d) or "0")
+                    if best is None or ver > best[0]:
+                        best = (ver, p)
         return best[1] if best else None
 
     def set_vina(self, path, quiet=False):
@@ -318,7 +385,7 @@ class DockingController:
         self._downloading = True
         self._download_cancel.clear()
         self._emit("busy", True)
-        dest = os.path.join(data_dir(), "vina")
+        dest = self.vina_root
 
         def work():
             try:
