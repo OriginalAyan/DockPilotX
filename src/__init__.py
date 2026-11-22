@@ -58,6 +58,20 @@ class _VinaPilotXAPI(BundleAPI):
         register(ci.name, desc, func, logger=logger)
 
     @staticmethod
+    def run_provider(session, name, mgr, **kw):
+        """Opens ``.vinapx`` project files (File > Open, drag and drop, or ``open project.vinapx``)."""
+        if mgr is session.open_command:
+            from chimerax.open_command import OpenerInfo
+
+            class _ProjectOpener(OpenerInfo):
+                def open(self, session, data, file_name, **kw):
+                    from .commands import cmd_open
+                    cmd_open(session, str(data))
+                    return [], "Opened the Lattice VinaPilotX project %s" % file_name
+            return _ProjectOpener()
+        raise ValueError("Unknown provider: %s" % name)
+
+    @staticmethod
     def get_class(class_name):
         if class_name == "VinaPilotXTool":
             from .tool import VinaPilotXTool

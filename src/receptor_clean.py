@@ -153,77 +153,81 @@ def save_model_pdb(session, model, out_pdb):
 
 
 class MinimizeWatcher:
-    """Listens to ChimeraX's status line to tell when a minimization has finished.
+    """Follows a ChimeraX minimization through its status-line messages.
 
-    ``minimize`` runs in the background and only reports on the status line (transient). This hook
-    notices "Minimization ... completed", writes a permanent line (with the last energy) to the Log and
-    calls *on_done*. It removes itself afterwards, or when stopped.
+    ``minimize`` runs in the background and reports on the status line ("Starting minimization",
+    "step N: energy X", "Minimization complete"). Those messages are intercepted by wrapping the logger's
+    ``status`` method for the duration of the run (the original is called as before and put back at the end).
+    *on_energy(step, energy)* is called for every energy report and *on_done(message, last_energy)* once when
+    the minimization has completed.
     """
 
-    _ENERGY = re.compile(r"energy[^\d+-]{0,12}(-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)", re.I)
+    DONE = re.compile(r"minimi[sz]ation\s+(complete|completed|converged|finished)", re.I)
+    ENERGY = re.compile(r"step\s+(\d+)[^\d+-]{0,6}energy[^\d+-]{0,6}(-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)", re.I)
 
-    def __init__(self, session, on_done, steps_note=""):
-        self.session, self.on_done, self.steps_note = session, on_done, steps_note
+    def __init__(self, session, on_done, on_energy=None):
+        self.session, self.on_done, self.on_energy = session, on_done, on_energy
         self.energies = []
+        self.started = False
         self.finished = False
-        self._added = False
-        self.excludes_log = False
-
-    # -- logger interface ------------------------------------------------
-    def log(self, level, msg, *args, **kw):
-        return False
-
-    def status(self, msg, color="black", secondary=False):
-        try:
-            text = str(msg)
-            low = text.lower()
-            if "minimi" not in low and "energy" not in low:
-                return
-            m = self._ENERGY.search(text)
-            if m:
-                self.energies.append(float(m.group(1)))
-            if "minimi" in low and ("complete" in low or "converged" in low or "finished" in low):
-                self._defer_finish(text)
-        except Exception:
-            pass
-
-    def _defer_finish(self, text):
-        """Finish outside the logger's own loop (removing a log while it iterates would skip entries)."""
-        if self.finished:
-            return
-        try:
-            from Qt.QtCore import QTimer
-            QTimer.singleShot(0, lambda: self._finish(text))
-        except Exception:
-            self._finish(text)
+        self._orig = None
+        self._wrapper = None
 
     def start(self):
-        try:
-            self.session.logger.add_log(self)
-            self._added = True
-        except Exception:
-            self._added = False
-        return self._added
+        logger = self.session.logger
+        self._orig = logger.status
+        orig, watcher = self._orig, self
 
-    def stop(self):
-        if self._added:
+        def status(msg, *args, **kw):
             try:
-                self.session.logger.remove_log(self)
+                watcher._seen(str(msg))
             except Exception:
                 pass
-            self._added = False
+            return orig(msg, *args, **kw)
+        self._wrapper = status
+        logger.status = status
+        return True
 
-    def _finish(self, text):
-        if self.finished:
-            return
-        self.finished = True
+    def stop(self):
+        logger = self.session.logger
+        if self._wrapper is not None:
+            try:
+                if logger.__dict__.get("status") is self._wrapper:
+                    del logger.status          # back to the class's own method
+                elif getattr(logger, "status", None) is self._wrapper:
+                    logger.status = self._orig
+            except Exception:
+                pass
+            self._wrapper = None
+
+    def _seen(self, text):
+        low = text.lower()
+        if "starting minimization" in low:
+            self.started = True
+        m = self.ENERGY.search(text)
+        if m:
+            step, e = int(m.group(1)), float(m.group(2))
+            self.energies.append((step, e))
+            if self.on_energy:
+                self.on_energy(step, e)
+        if self.DONE.search(text) and not self.finished:
+            self.finished = True
+            self._defer(text)
+
+    def _defer(self, text):
+        """Finish outside the status call itself (the logger is still busy with it)."""
+        try:
+            from Qt.QtCore import QTimer
+            QTimer.singleShot(0, self._finish)
+        except Exception:
+            self._finish()
+
+    def _finish(self):
         self.stop()
-        energy = self.energies[-1] if self.energies else None
+        energy = self.energies[-1][1] if self.energies else None
         msg = "Minimization completed"
         if energy is not None:
-            msg += " (final energy %.2f)" % energy
-        if self.steps_note:
-            msg += ". " + self.steps_note
+            msg += " (last reported energy %.2f at step %d)" % (energy, self.energies[-1][0])
         self.session.logger.info(msg)
         try:
             self.on_done(msg, energy)
@@ -231,24 +235,44 @@ class MinimizeWatcher:
             pass
 
 
-def minimize_model(session, model, steps=100, until_converged=False, on_done=None):
-    """Start ChimeraX energy minimization (runs in the background).
+def assign_charges(session, model, say=None):
+    """Assign force-field types and charges before minimizing (standard residues get Amber ff14SB values;
+    anything else gets Gasteiger charges, which is fast). Meeko computes its own charges later, so these do
+    not reach the docking inputs."""
+    run(session, "addcharge %s method gasteiger" % _spec(model))
+    if say:
+        say("Assigned force-field types and charges (addcharge).")
 
-    Energies are written to the Log (``logEnergy true``) and, when it finishes, "Minimization completed" is
-    written there too and *on_done(message, last_energy)* is called. Dock Prep is not repeated, so
-    hydrogens, protonation and charges stay as they are. Returns the watcher (call ``.stop()`` to cancel).
+
+TEMPLATE_HINT = ("A residue could not be matched to the force field. This usually means non-polar hydrogens are "
+                 "missing (add them in step 2) or the model still has a ligand, ion or non-standard residue.")
+
+
+def minimize_model(session, model, steps=100, until_converged=False, on_done=None, on_energy=None, log=None):
+    """Assign charges, then start ChimeraX energy minimization (it runs in the background).
+
+    ``logEnergy true`` makes ChimeraX report energies in its Log (every 100 steps; shorter runs report none).
+    Hydrogens, protonation and the structure are not changed by the dock-prep step (``dockPrep false``).
+    Returns the watcher (call ``.stop()`` to stop following).
     """
+    say = log or (lambda m: None)
     max_steps = 0 if until_converged else int(steps)
+    try:
+        assign_charges(session, model, say)
+    except UserError as err:
+        raise UserError("Charges could not be assigned: %s\n%s" % (err, TEMPLATE_HINT))
     watcher = None
     if on_done is not None:
-        watcher = MinimizeWatcher(session, on_done)
+        watcher = MinimizeWatcher(session, on_done, on_energy)
         watcher.start()
     base = "minimize %s dockPrep false maxSteps %d" % (_spec(model), max_steps)
     try:
         try:
             run(session, base + " logEnergy true")
-        except UserError:           # older ChimeraX without logEnergy
-            run(session, base)
+        except UserError as err:
+            if "AMBER/GAFF" in str(err) or "partial charges" in str(err):
+                raise UserError("%s\n%s" % (err, TEMPLATE_HINT))
+            run(session, base)           # older ChimeraX without logEnergy
     except UserError:
         if watcher:
             watcher.stop()

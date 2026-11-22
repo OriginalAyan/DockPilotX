@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- VinaPilotX source bundle. Build with ChimeraX's "devel build" command. -->
-<BundleInfo name="ChimeraX-VinaPilotX" version="0.8.0" package="chimerax.vinapilotx"
+<BundleInfo name="ChimeraX-VinaPilotX" version="0.9.0" package="chimerax.vinapilotx"
             minSessionVersion="1" maxSessionVersion="1" customInit="true">
   <Author>Ayan Bhowmik</Author>
   <Email>ayan.bhowmik.bd@gmail.com</Email>
@@ -26,6 +26,13 @@ Distributed under LGPL-2.1-only because it includes adapted LGPL-licensed mouse-
     <DataFile>LICENSE.txt</DataFile>
     <DataFile>THIRD_PARTY_NOTICES.md</DataFile>
   </DataFiles>
+  <Providers manager="data formats">
+    <Provider name="VinaPilotX project" category="Workflow" suffixes=".vinapx" nicknames="vinapx"
+              synopsis="Lattice VinaPilotX project (small manifest next to the prepared files and results)"/>
+  </Providers>
+  <Providers manager="open command">
+    <Provider name="VinaPilotX project" want_path="true"/>
+  </Providers>
   <Classifiers>
     <PythonClassifier>Development Status :: 3 - Alpha</PythonClassifier>
     <PythonClassifier>Intended Audience :: Science/Research</PythonClassifier>
@@ -36,6 +43,7 @@ Distributed under LGPL-2.1-only because it includes adapted LGPL-licensed mouse-
     <PythonClassifier>Topic :: Scientific/Engineering :: Chemistry</PythonClassifier>
     <ChimeraXClassifier>ChimeraX :: Tool :: Lattice VinaPilotX :: Binding Analysis :: Dock ligands with AutoDock Vina: setup, search box, run, results</ChimeraXClassifier>
     <ChimeraXClassifier>ChimeraX :: Command :: vinax gui :: Binding Analysis :: Open the Lattice VinaPilotX window</ChimeraXClassifier>
+    <ChimeraXClassifier>ChimeraX :: Command :: vinax open :: Binding Analysis :: Open a Lattice VinaPilotX project (.vinapx)</ChimeraXClassifier>
     <ChimeraXClassifier>ChimeraX :: Command :: vinax vina :: Binding Analysis :: Set, verify or download the AutoDock Vina program</ChimeraXClassifier>
     <ChimeraXClassifier>ChimeraX :: Command :: vinax box :: Binding Analysis :: Create or update the search box</ChimeraXClassifier>
     <ChimeraXClassifier>ChimeraX :: Command :: vinax run :: Binding Analysis :: Dock one or many ligands with AutoDock Vina</ChimeraXClassifier>

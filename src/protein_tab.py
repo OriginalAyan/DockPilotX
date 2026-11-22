@@ -1,12 +1,19 @@
-"""Protein tab: clean a PDB/mmCIF receptor with Dock Prep, set hydrogens, minimize, and convert it with Meeko."""
+"""Protein tab: clean a PDB/mmCIF receptor with Dock Prep, set hydrogens, minimize, and convert it with Meeko.
+
+Every step writes a checkpoint file into the receptor's *revision* folder and is recorded in the project file,
+so a project can be closed and continued later, and a new start never mixes with an older protein.
+"""
 
 import os
+import shutil
 
+from Qt.QtCore import QTimer
 from Qt.QtWidgets import (
     QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit,
     QProgressBar, QPushButton, QSpinBox, QVBoxLayout, QWidget,
 )
 
+from . import layout, prep_undo
 from .pdbqt_tools import safe_name
 from .prep_widgets import BAD_STYLE, OK_STYLE, WARN_STYLE, EnvBanner, PkaTable
 from .receptor_clean import SIDE_CHAIN_CHOICES, STANDARDIZE_NOTE
@@ -19,17 +26,30 @@ POLAR_MODES = [
 ]
 
 
+def _small_note(text):
+    lbl = QLabel(text)
+    lbl.setWordWrap(True)
+    lbl.setStyleSheet("color: gray;")
+    return lbl
+
+
 class ProteinTab(QWidget):
     def __init__(self, session, controller, host):
         super().__init__()
         self.session = session
         self.controller = controller
-        self.host = host          # the tool: workdir_edit, receptor_edit, _receptor_chosen, show_tab
+        self.host = host          # the tool: workdir_edit, receptor_edit, _receptor_chosen, show_tab, get_project
         self._model_ids = []
         self._prep_model = None       # the cleaned copy in the scene
         self._prep_name = None
-        self._prep_source = None
+        self._rev = None              # active revision (dict of the project file)
+        self._orig_model = None       # open model the copy was made from (hidden while the copy is shown)
         self._min_watch = None
+        self._h_pre = None            # checkpoint saved before the running hydrogen step
+        self._h_ends = []
+        self._h_in_pdb = None
+        self._swap_state = None
+        self._convert_rev = None
         self._build_ui()
         self.refresh_env()
 
@@ -38,6 +58,26 @@ class ProteinTab(QWidget):
         lay = QVBoxLayout(self)
         self.banner = EnvBanner(self.controller, self.host)
         lay.addWidget(self.banner)
+
+        g = QGroupBox("Saved receptor preparations")
+        gl = QVBoxLayout(g)
+        self.rev_combo = QComboBox()
+        self.rev_combo.setToolTip("Each start from a protein is saved as a revision in the working directory.")
+        gl.addWidget(self.rev_combo)
+        row = QHBoxLayout()
+        self.rev_continue_btn = QPushButton("Continue from latest step")
+        self.rev_continue_btn.setToolTip("Opens the last saved structure of this revision so you can carry on.")
+        self.rev_continue_btn.clicked.connect(self._continue_revision)
+        self.rev_use_btn = QPushButton("Use its PDBQT")
+        self.rev_use_btn.setToolTip("Puts the converted receptor of this revision on the Inputs tab.")
+        self.rev_use_btn.clicked.connect(self._use_revision_pdbqt)
+        row.addWidget(self.rev_continue_btn)
+        row.addWidget(self.rev_use_btn)
+        gl.addLayout(row)
+        self.rev_label = QLabel("")
+        self.rev_label.setWordWrap(True)
+        gl.addWidget(self.rev_label)
+        lay.addWidget(g)
 
         g = QGroupBox("Receptor (PDB / mmCIF)")
         gl = QVBoxLayout(g)
@@ -52,7 +92,8 @@ class ProteinTab(QWidget):
         row = QHBoxLayout()
         row.addWidget(QLabel("or open model"))
         self.model_combo = QComboBox()
-        self.model_combo.setToolTip("Prepare a copy of a model that is already open. The model itself is not changed.")
+        self.model_combo.setToolTip("Prepare a copy of a model that is already open. The model itself is not changed "
+                                    "(it is hidden while the copy is shown).")
         row.addWidget(self.model_combo, 1)
         gl.addLayout(row)
         self.chains_edit = QLineEdit()
@@ -97,7 +138,8 @@ class ProteinTab(QWidget):
         row.addWidget(self.sc_combo, 1)
         gl.addLayout(row)
         self.rec_btn = QPushButton("1. Clean receptor")
-        self.rec_btn.setToolTip("Runs Dock Prep on a copy and keeps it in the scene as <name>_prep. Adds no hydrogens.")
+        self.rec_btn.setToolTip("Runs Dock Prep on a copy and keeps it in the scene as <name>_prep. Adds no hydrogens. "
+                                "Starts a new saved revision.")
         self.rec_btn.clicked.connect(self._clean_receptor)
         gl.addWidget(self.rec_btn)
         lay.addWidget(g)
@@ -113,7 +155,8 @@ class ProteinTab(QWidget):
             "Keep: add no polar hydrogens; the ones in the file stay as they are.\n"
             "ChimeraX: residue names are used (HID/HIE/HIP, ASH, GLH, LYN, CYM); plain HIS is decided by H-bonds;\n"
             "   other residues get the usual pH ~7 state.\n"
-            "PDB2PQR: PROPKA predicts pKa values and the states follow the pH you enter. Existing hydrogens are replaced.")
+            "PDB2PQR: PROPKA predicts pKa values and the states follow the pH you enter. Existing hydrogens are replaced.\n"
+            "   Chain ends follow PROPKA when they are real ends and are neutral when the chain was cut.")
         row = QHBoxLayout()
         row.addWidget(self.polar_combo, 1)
         self.ph_spin = QDoubleSpinBox()
@@ -128,12 +171,23 @@ class ProteinTab(QWidget):
         self.polar_combo.currentIndexChanged.connect(self._polar_changed)
         self.nonpolar_cb = QCheckBox("Add non-polar hydrogens (on carbon)")
         self.nonpolar_cb.setToolTip("Separate from the polar ones. Docking does not need them; minimization does.\n"
-                                    "Only hydrogens on carbon are added, so polar hydrogens you removed stay removed.")
+                                    "Only hydrogens on carbon are kept, so polar hydrogens you removed stay removed.")
         gl.addWidget(self.nonpolar_cb)
+        row = QHBoxLayout()
         self.h_btn = QPushButton("2. Apply hydrogens")
         self.h_btn.setToolTip("Applies the choices above to the cleaned copy (it is cleaned first if needed).")
         self.h_btn.clicked.connect(self._apply_hydrogens)
-        gl.addWidget(self.h_btn)
+        row.addWidget(self.h_btn)
+        self.h_undo_btn = QPushButton("Undo")
+        self.h_undo_btn.setToolTip("Go back to the structure before the last hydrogen step. (Also works with ChimeraX's undo.)")
+        self.h_undo_btn.clicked.connect(self._undo_hydrogens)
+        self.h_undo_btn.setEnabled(False)
+        row.addWidget(self.h_undo_btn)
+        self.h_redo_btn = QPushButton("Redo")
+        self.h_redo_btn.clicked.connect(self._redo_hydrogens)
+        self.h_redo_btn.setEnabled(False)
+        row.addWidget(self.h_redo_btn)
+        gl.addLayout(row)
         self.h_result = QLabel("")
         self.h_result.setWordWrap(True)
         gl.addWidget(self.h_result)
@@ -148,7 +202,7 @@ class ProteinTab(QWidget):
         row = QHBoxLayout()
         self.min_btn = QPushButton(MIN_TEXT)
         self.min_btn.setToolTip("ChimeraX energy minimization of the cleaned copy. Moves all atoms. "
-                                "Energies go to the ChimeraX Log; this tool tells you when it is done.")
+                                "Charges are assigned first (addcharge). ChimeraX reports energies every 100 steps.")
         self.min_btn.clicked.connect(self._minimize)
         row.addWidget(self.min_btn)
         self.min_steps = QSpinBox()
@@ -160,6 +214,7 @@ class ProteinTab(QWidget):
         self.min_conv.setToolTip("Not recommended: can take very long for a whole protein.")
         row.addWidget(self.min_conv)
         gl.addLayout(row)
+        gl.addWidget(_small_note("Minimization needs the non-polar hydrogens too (step 2). They are not added automatically."))
         self.bad_cb = QCheckBox("Skip residues Meeko cannot handle")
         self.bad_cb.setToolTip("Residues without a matching template are dropped, with a warning, instead of stopping.")
         self.bad_cb.setChecked(True)
@@ -225,6 +280,82 @@ class ProteinTab(QWidget):
     def _polar_changed(self, *_):
         self.ph_spin.setEnabled(self.polar_combo.currentData() == "pdb2pqr")
 
+    # ------------------------------------------------------------ project / revisions
+    def _project(self):
+        return self.host.get_project()
+
+    def load_project(self):
+        """Fill the saved-preparations list from the project file of the working directory."""
+        proj = self._project()
+        self.rev_combo.clear()
+        revs = proj.revisions if proj else []
+        for r in revs:
+            self.rev_combo.addItem(proj.summary(r), r["id"])
+        if proj and proj.data["receptor"]["active"]:
+            i = self.rev_combo.findData(proj.data["receptor"]["active"])
+            if i >= 0:
+                self.rev_combo.setCurrentIndex(i)
+        self.rev_label.setText("" if revs else "None yet. Step 1 starts the first one.")
+        self.rev_continue_btn.setEnabled(bool(revs))
+        self.rev_use_btn.setEnabled(bool(revs))
+
+    def _selected_revision(self):
+        proj = self._project()
+        return (proj, proj.revision(self.rev_combo.currentData())) if proj and self.rev_combo.currentData() else (proj, None)
+
+    def _continue_revision(self):
+        from .receptor_clean import open_prep_model
+        proj, rev = self._selected_revision()
+        if rev is None:
+            return
+        stage, path = proj.latest_stage(rev)
+        if path is None:
+            self._fail("This revision has no saved structure. Run step 1 again.")
+            return
+        try:
+            if self._prep_alive():
+                self.session.models.close([self._prep_model])
+            self._prep_model = open_prep_model(self.session, path, rev["name"])
+        except Exception as err:
+            self._fail("Could not open %s: %s" % (path, err))
+            return
+        self._rev, self._prep_name = rev, rev["name"]
+        proj.data["receptor"]["active"] = rev["id"]
+        proj.save()
+        self.pka_table.setVisible(False)
+        self.rec_result.setText("✔ Continuing %s from its last saved step (%s). Run the next step." % (rev["id"], stage))
+        self.rec_result.setStyleSheet(OK_STYLE)
+        self.log_line("Opened %s (%s step) as %s_prep." % (os.path.basename(path), stage, rev["name"]))
+
+    def _use_revision_pdbqt(self):
+        proj, rev = self._selected_revision()
+        if rev is None:
+            return
+        p = proj.pdbqt(rev)
+        if not p:
+            self._fail("This revision has not been converted yet. Run step 4 on it.")
+            return
+        proj.data["receptor"]["active"] = rev["id"]
+        proj.save()
+        self.host.receptor_edit.setText(p)
+        self.host._receptor_chosen(open_model=True)
+        self.rec_result.setText("✔ %s is now the receptor on the Inputs tab." % os.path.basename(p))
+        self.rec_result.setStyleSheet(OK_STYLE)
+
+    def _checkpoint(self, stage, **info):
+        """Save the current copy as the checkpoint of *stage* and record it in the project file."""
+        from .receptor_clean import save_model_pdb
+        proj = self._project()
+        if proj is None or self._rev is None or not self._prep_alive():
+            return None
+        path = proj.stage_file(self._rev, stage)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        save_model_pdb(self.session, self._prep_model, path)
+        proj.set_stage(self._rev, stage, path, **info)
+        proj.save()
+        self.load_project()
+        return path
+
     # ------------------------------------------------------------ helpers
     def _workdir(self):
         w = self.host.workdir_edit.text().strip().strip('"')
@@ -241,21 +372,23 @@ class ProteinTab(QWidget):
             self.rec_edit.setText(p)
             self.model_combo.setCurrentIndex(0)
 
-    def _source(self, out_dir):
-        """(source file, name) from the file field or the selected open model; None if neither is usable."""
+    def _source(self, wd):
+        """(source file, name, open model or None) from the file field or the selected open model."""
         idx = self.model_combo.currentIndex()
         if 0 < idx < len(self._model_ids):
             from chimerax.core.commands import run
             m = self._model_ids[idx]
             name = safe_name(m.name) or "receptor"
-            source = os.path.join(out_dir, name + "_source.pdb")
+            src_dir = os.path.join(layout.make(wd, "prepared"), "sources")
+            os.makedirs(src_dir, exist_ok=True)
+            source = os.path.join(src_dir, name + "_source.pdb")
             spec = "#" + ".".join(str(i) for i in m.id)
             run(self.session, 'save "%s" %s relModel %s' % (source.replace("\\", "/"), spec, spec))
-            return source, name
+            return source, name, m
         source = self.rec_edit.text().strip().strip('"')
         if not source or not os.path.isfile(source):
             return None
-        return source, safe_name(os.path.splitext(os.path.basename(source))[0]) or "receptor"
+        return source, safe_name(os.path.splitext(os.path.basename(source))[0]) or "receptor", None
 
     def _fail(self, text, label=None):
         (label or self.rec_result).setText(text)
@@ -267,40 +400,61 @@ class ProteinTab(QWidget):
 
     # ------------------------------------------------------- 1 clean
     def _clean_receptor(self):
-        """Step 1: Dock Prep on a copy; the copy stays in the scene."""
+        """Step 1: Dock Prep on a copy; the copy stays in the scene and starts a new revision."""
         from .receptor_clean import clean_receptor
         wd = self._workdir()
         if wd is None:
             return False
-        out_dir = os.path.join(wd, "prepared", "receptor")
-        os.makedirs(out_dir, exist_ok=True)
         try:
-            src = self._source(out_dir)
+            src = self._source(wd)
             if src is None:
                 self._fail("Choose a protein file or an open model.")
                 return False
-            source, name = src
+            source, name, orig = src
+            proj = self._project()
+            options = {"delete_solvent": self.water_cb.isChecked(), "delete_ions": self.ions_cb.isChecked(),
+                       "delete_altlocs": self.alt_cb.isChecked(), "delete_incomplete_backbone": self.bb_cb.isChecked(),
+                       "delete_other_ligands": self.lig_cb.isChecked(), "standardize": self.std_cb.isChecked(),
+                       "side_chains": self.sc_combo.currentData() if self.sc_cb.isChecked() else "",
+                       "chains": self.chains_edit.text().strip()}
             if self._prep_alive():
                 self.session.models.close([self._prep_model])
             model, summary = clean_receptor(
                 self.session, source, name, chains=self.chains_edit.text(),
-                del_water=self.water_cb.isChecked(), del_ions=self.ions_cb.isChecked(),
-                del_ligands=self.lig_cb.isChecked(), del_altlocs=self.alt_cb.isChecked(),
-                del_incomplete=self.bb_cb.isChecked(), standardize=self.std_cb.isChecked(),
-                side_chains=self.sc_combo.currentData() if self.sc_cb.isChecked() else "", log=self.log_line)
+                del_water=options["delete_solvent"], del_ions=options["delete_ions"],
+                del_ligands=options["delete_other_ligands"], del_altlocs=options["delete_altlocs"],
+                del_incomplete=options["delete_incomplete_backbone"], standardize=options["standardize"],
+                side_chains=options["side_chains"], log=self.log_line)
         except Exception as err:
             self._fail("Cleaning failed: %s" % err)
             return False
-        self._prep_model, self._prep_name, self._prep_source = model, name, source
+        self._prep_model, self._prep_name = model, name
+        self._rev = proj.new_revision(name, proj.rel(source) if orig is None else "open model " + str(orig.name), options)
+        self._checkpoint("clean")
+        # a new protein must never be mixed up with the receptor of an earlier revision
+        self.host.drop_prepared_receptor("a new receptor preparation was started (%s)" % self._rev["id"])
+        if orig is not None and not getattr(orig, "deleted", False):
+            try:
+                orig.display = False
+                self.log_line("Hid the original model #%s (%s); the cleaned copy is shown instead."
+                              % (".".join(str(i) for i in orig.id), orig.name))
+            except Exception:
+                pass
+        try:
+            model.display = True
+        except Exception:
+            pass
+        self._orig_model = orig
         self.pka_table.setVisible(False)
+        self._set_undo_state(None)
         self.log_line(summary)
-        self.rec_result.setText("✔ %s Step 2 sets hydrogens (optional)." % summary)
+        self.rec_result.setText("✔ %s Saved as revision %s. Step 2 sets hydrogens (optional)." % (summary, self._rev["id"]))
         self.rec_result.setStyleSheet(OK_STYLE)
         return True
 
     # ------------------------------------------------------- 2 hydrogens
     def _apply_hydrogens(self):
-        from .hydrogens import add_hydrogens, count_hydrogens
+        from .receptor_clean import save_model_pdb
         mode = self.polar_combo.currentData()
         if mode == "pdb2pqr" and not self.controller.pdb2pqr_ok:
             self._fail("PDB2PQR is not installed. Install it on the Settings tab (below Meeko).", self.h_result)
@@ -311,56 +465,93 @@ class ProteinTab(QWidget):
         if wd is None:
             return
         self.h_result.setText("")
-        if mode == "pdb2pqr":
-            from .receptor_clean import save_model_pdb
-            out_dir = os.path.join(wd, "prepared", "receptor", "pdb2pqr")
-            os.makedirs(out_dir, exist_ok=True)
-            in_pdb = os.path.join(out_dir, self._prep_name + "_before_pdb2pqr.pdb")
-            try:
-                save_model_pdb(self.session, self._prep_model, in_pdb)
-            except Exception as err:
-                self._fail("Saving failed: %s" % err, self.h_result)
-                return
-            self.h_result.setText("Running PDB2PQR + PROPKA ...")
-            self.h_result.setStyleSheet("")
-            self.controller.run_pdb2pqr_async(in_pdb, out_dir, self._prep_name, self.ph_spin.value())
-            return
-        notes = []
+        # checkpoint of the structure before this step, for undo
+        proj = self._project()
+        self._h_pre = os.path.join(proj.rev_dir(self._rev), "_before_hydrogens.pdb")
         try:
+            save_model_pdb(self.session, self._prep_model, self._h_pre)
+        except Exception as err:
+            self._fail("Saving failed: %s" % err, self.h_result)
+            return
+        if mode == "pdb2pqr":
+            self._start_pdb2pqr()
+            return
+        try:
+            notes = []
             if mode == "chimerax":
-                added, wrong = add_hydrogens(self.session, self._prep_model, "polar", self.log_line)
-                notes.append("%d polar hydrogens added" % added)
-            self._finish_hydrogens(notes)
+                from .hydrogens import add_hydrogens
+                d = add_hydrogens(self.session, self._prep_model, "polar", self.log_line)
+                notes.append("polar hydrogens: %d kept (ChimeraX placed %d in total, %d on carbon removed)"
+                             % (d["kept"], d["placed"], d["removed"]))
+            self._finish_hydrogens(notes, mode)
         except Exception as err:
             self._fail("Adding hydrogens failed: %s" % err, self.h_result)
 
-    def _finish_hydrogens(self, notes):
-        """Non-polar step (if wanted) and the summary line."""
+    def _start_pdb2pqr(self):
+        from .receptor_clean import save_model_pdb
+        from .hydrogens import chain_ends
+        proj = self._project()
+        out_dir = os.path.join(proj.rev_dir(self._rev), "pdb2pqr")
+        os.makedirs(out_dir, exist_ok=True)
+        in_pdb = os.path.join(out_dir, self._prep_name + "_before_pdb2pqr.pdb")
+        try:
+            save_model_pdb(self.session, self._prep_model, in_pdb)
+            self._h_ends = chain_ends(self._prep_model)       # real or cut ends, from the structure with SEQRES
+        except Exception as err:
+            self._fail("Saving failed: %s" % err, self.h_result)
+            return
+        n_art = sum(1 for e in self._h_ends if not e["real"])
+        self.log_line("Chain ends: %d real, %d cut (neutral)." % (len(self._h_ends) - n_art, n_art))
+        self._h_in_pdb = in_pdb
+        self.h_result.setText("Running PDB2PQR + PROPKA ...")
+        self.h_result.setStyleSheet("")
+        self.controller.run_pdb2pqr_async(in_pdb, out_dir, self._prep_name, self.ph_spin.value())
+
+    def _finish_hydrogens(self, notes, mode):
+        """Non-polar step (if wanted), checkpoint, undo registration and the summary line."""
         from .hydrogens import add_hydrogens, count_hydrogens
         if self.nonpolar_cb.isChecked():
-            added, wrong = add_hydrogens(self.session, self._prep_model, "nonpolar", self.log_line)
-            notes.append("%d non-polar hydrogens added" % added)
+            d = add_hydrogens(self.session, self._prep_model, "nonpolar", self.log_line)
+            notes.append("non-polar hydrogens: %d kept (ChimeraX placed %d in total, %d on N/O/S removed)"
+                         % (d["kept"], d["placed"], d["removed"]))
         pol, nonpol = count_hydrogens(self._prep_model)
         notes.append("now %d polar and %d non-polar hydrogens" % (pol, nonpol))
+        after = self._checkpoint("hydrogens", polar_mode=mode, ph=self.ph_spin.value() if mode == "pdb2pqr" else None,
+                                 nonpolar=self.nonpolar_cb.isChecked())
+        if self._h_pre and after:
+            act = prep_undo.ModelSwapUndo("receptor hydrogens", self._h_pre, after, self._swap_model)
+            prep_undo.register(self.session, act)
+            self._set_undo_state("after")
         text = "✔ " + "; ".join(notes) + "."
         self.log_line(text)
         self.h_result.setText(text)
         self.h_result.setStyleSheet(OK_STYLE)
 
     def pdb2pqr_done(self, payload):
-        from .hydrogens import remove_nonpolar
+        from . import pdb2pqr_tools as pq
+        from .hydrogens import fix_termini, remove_nonpolar
         from .receptor_clean import open_prep_model
         res, err = payload
         if err:
             self._fail("✘ " + err, self.h_result)
             return
         try:
+            n_seq = pq.copy_seqres(self._h_in_pdb, res["pdb"])      # lets ChimeraX recognise real and cut ends
+            if not n_seq:
+                self.log_line("Note: no SEQRES records were available, so ChimeraX cannot tell cut chain ends "
+                              "apart from real ones; all ends follow PROPKA.")
             if self._prep_alive():
                 self.session.models.close([self._prep_model])
             model = open_prep_model(self.session, res["pdb"], self._prep_name)
-            n_c = remove_nonpolar(model)       # polar only; non-polar ones are an option of their own
+            removed_c = remove_nonpolar(model)       # polar only; non-polar ones are an option of their own
             self._prep_model = model
-            notes = ["PDB2PQR/PROPKA at pH %g" % res["ph"]]
+            notes = ["PDB2PQR/PROPKA at pH %g" % res["ph"], "%d carbon hydrogens set aside" % removed_c]
+            end_notes = fix_termini(self.session, model, self._h_ends, res["table"], res["ph"], self.log_line)
+            for r in res["table"]:
+                if r["group"] in ("N+", "C-"):
+                    n = end_notes.get((r["chain"], r["number"], "N" if r["group"] == "N+" else "C"))
+                    if n:
+                        r["renamed"] = n
             if res["renamed"]:
                 notes.append("renamed: " + ", ".join(res["renamed"][:8]) + (" …" if len(res["renamed"]) > 8 else ""))
             self.pka_table.set_rows(res["table"], res["ph"], "pKa values (saved to %s)" % os.path.basename(res["csv_path"]))
@@ -370,13 +561,58 @@ class ProteinTab(QWidget):
                     "   <-- within ±%d of the pH" % (1 if r["flag"] == "close" else 2) if r["flag"] else ""))
             self.log_line("Log: %s" % res["log_path"])
             self.log_line("Table: %s" % res["csv_path"])
-            self._finish_hydrogens(notes)
+            self._finish_hydrogens(notes, "pdb2pqr")
         except Exception as err2:
             self._fail("Could not use the PDB2PQR result: %s" % err2, self.h_result)
 
+    # ---- undo / redo of the hydrogen step
+    def _swap_model(self, path, which):
+        """Replace the copy in the scene by the structure in *path* (idempotent)."""
+        from .receptor_clean import open_prep_model
+        if getattr(self, "_swap_state", None) == which and self._prep_alive():
+            return
+        try:
+            if self._prep_alive():
+                self.session.models.close([self._prep_model])
+            self._prep_model = open_prep_model(self.session, path, self._prep_name)
+        except Exception as err:
+            self._fail("Could not restore %s: %s" % (os.path.basename(path), err), self.h_result)
+            return
+        self._swap_state = which
+        proj = self._project()
+        if self._rev is not None and proj is not None:
+            if which == "before":
+                for st in ("hydrogens", "minimized", "pdbqt"):
+                    self._rev["stages"].pop(st, None)
+            proj.save()
+            self.load_project()
+        self._set_undo_state(which)
+        self.h_result.setText("Hydrogens: %s." % ("undone, back to the structure before the step" if which == "before"
+                                                  else "redone"))
+        self.h_result.setStyleSheet(WARN_STYLE)
+
+    def _set_undo_state(self, state):
+        self._swap_state = state
+        self.h_undo_btn.setEnabled(state == "after")
+        self.h_redo_btn.setEnabled(state == "before")
+
+    def _undo_hydrogens(self):
+        if self._h_pre and self._swap_state == "after":
+            self._swap_model(self._h_pre, "before")
+
+    def _redo_hydrogens(self):
+        proj = self._project()
+        if proj is None or self._rev is None:
+            return
+        path = proj.stage_file(self._rev, "hydrogens")
+        if self._swap_state == "before" and os.path.isfile(path):
+            self._swap_model(path, "after")
+            self._rev["stages"]["hydrogens"] = {"file": proj.rel(path)}
+            proj.save()
+            self.load_project()
+
     # ------------------------------------------------------- 3 minimize
     def _minimize(self):
-        from .hydrogens import lacks_nonpolar
         from .receptor_clean import minimize_model
         if self._min_watch is not None:          # running: this button is "Stop"
             self._stop_minimize()
@@ -385,18 +621,26 @@ class ProteinTab(QWidget):
             return
         if not (self.ions_cb.isChecked() and self.lig_cb.isChecked()):
             self.log_line("Note: ligands/ions are kept, so minimization may fail for lack of parameters.")
-        if lacks_nonpolar(self._prep_model):
-            self.log_line("Note: the model has no non-polar hydrogens. Minimization works best with all hydrogens "
-                          "(step 2: tick 'Add non-polar hydrogens').")
         try:
             self._min_watch = minimize_model(self.session, self._prep_model, self.min_steps.value(),
-                                             self.min_conv.isChecked(), on_done=self._minimize_done)
+                                             self.min_conv.isChecked(), on_done=self._minimize_done,
+                                             on_energy=self._minimize_energy, log=self.log_line)
         except Exception as err:
             self._fail("Minimization failed: %s" % err)
             return
         self.min_btn.setText("3. Stop minimization")
-        self.rec_result.setText("Minimizing ... energies are written to the ChimeraX Log.")
+        self.rec_result.setText("Minimizing ... press Stop to end it early.")
         self.rec_result.setStyleSheet(WARN_STYLE)
+        w = self._min_watch
+        QTimer.singleShot(8000, lambda: self._check_following(w))
+
+    def _check_following(self, watcher):
+        if watcher is self._min_watch and watcher is not None and not watcher.started and not watcher.finished:
+            self.log_line("Could not follow the minimization from the status line. Watch ChimeraX's status bar; "
+                          "when it says 'Minimization complete', press Stop here and continue.")
+
+    def _minimize_energy(self, step, energy):
+        self.log_line("minimization step %d: energy %.2f" % (step, energy))
 
     def _stop_minimize(self):
         from chimerax.core.commands import run
@@ -412,11 +656,17 @@ class ProteinTab(QWidget):
         self.rec_result.setStyleSheet(WARN_STYLE)
 
     def _minimize_done(self, message, energy):
-        self._min_watch = None
+        w, self._min_watch = self._min_watch, None
         self.min_btn.setText(MIN_TEXT)
+        self.log_line(message)
+        if w is not None and not w.energies:
+            self.log_line("(ChimeraX reports energies every 100 steps; runs shorter than that report none.)")
+        try:
+            self._checkpoint("minimized", energy=energy)
+        except Exception as err:
+            self.log_line("Could not save the minimized structure: %s" % err)
         self.rec_result.setText("✔ %s. Step 4 converts the minimized model." % message)
         self.rec_result.setStyleSheet(OK_STYLE)
-        self.log_line(message)
         self.conv_btn.setEnabled(self.controller.prep_ok and not self.controller.prep_busy)
 
     # ------------------------------------------------------- 4 convert
@@ -432,8 +682,9 @@ class ProteinTab(QWidget):
             return
         if not self._prep_alive() and not self._clean_receptor():
             return
-        out_dir = os.path.join(wd, "prepared", "receptor")
-        clean_pdb = os.path.join(out_dir, self._prep_name + "_clean.pdb")
+        proj = self._project()
+        out_dir = proj.rev_dir(self._rev)
+        clean_pdb = os.path.join(out_dir, "04_for_meeko.pdb")
         try:
             save_model_pdb(self.session, self._prep_model, clean_pdb)
         except Exception as err:
@@ -441,6 +692,7 @@ class ProteinTab(QWidget):
             return
         self.rec_result.setText("Running Meeko ...")
         self.rec_result.setStyleSheet("")
+        self._convert_rev = self._rev
         self.controller.prepare_receptor_async(clean_pdb, os.path.join(out_dir, self._prep_name), self.bad_cb.isChecked())
 
     def receptor_done(self, payload):
@@ -449,6 +701,12 @@ class ProteinTab(QWidget):
             self._fail("✘ " + err)
             return
         path, skipped, rescued = res
+        proj, rev = self._project(), getattr(self, "_convert_rev", None)
+        if proj is not None and rev is not None:
+            proj.set_stage(rev, "pdbqt", path, skipped=list(skipped), rescued=list(rescued))
+            proj.data["receptor"]["active"] = rev["id"]
+            proj.save()
+            self.load_project()
         text = "✔ %s" % path
         if rescued:
             text += "\n✔ Kept after retrying without their hydrogens (Meeko assigned standard hydrogens): %s." % ", ".join(rescued)

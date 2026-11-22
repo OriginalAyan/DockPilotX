@@ -3,7 +3,7 @@
 import csv
 import os
 
-from Qt.QtCore import Qt, QUrl
+from Qt.QtCore import QTimer, Qt, QUrl
 from Qt.QtGui import QBrush, QColor, QDesktopServices, QFont, QGuiApplication
 from Qt.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame,
@@ -14,7 +14,8 @@ from Qt.QtWidgets import (
 from chimerax.core.tools import ToolInstance
 from chimerax.core.commands import run
 
-from . import docking, pdbqt_tools
+from . import docking, layout, pdbqt_tools
+from .project import Project
 from .box_panel import BoxPanel
 from .controller import get_controller
 
@@ -91,6 +92,7 @@ class VinaPilotXTool(ToolInstance):
         self._slots = []              # per-running-ligand progress widgets
         self._receptor_path = None
         self._receptor_models = []
+        self._project = None
         self._build_ui()
         self._restore_settings()
         self.controller.add_listener(self._on_event)
@@ -181,8 +183,23 @@ class VinaPilotXTool(ToolInstance):
         gl = QVBoxLayout(g)
         self.workdir_edit = QLineEdit()
         self.workdir_edit.setPlaceholderText("Choose or type a folder, e.g. C:/docking/project1")
+        self.workdir_edit.editingFinished.connect(self._workdir_changed)
         row, _ = _row_with_browse(self.workdir_edit, "Browse…", self._browse_workdir)
         gl.addLayout(row)
+        n = QLabel("Use a new folder for each docking project. The tool keeps a project file (project.vinapx) and "
+                   "folders starting with vinax_ here: do not rename or edit them.")
+        n.setWordWrap(True)
+        gl.addWidget(n)
+        prow = QHBoxLayout()
+        self.project_label = QLabel("")
+        self.project_label.setWordWrap(True)
+        prow.addWidget(self.project_label, 1)
+        self.project_open_btn = QPushButton("Open project…")
+        self.project_open_btn.setToolTip("Open a project.vinapx file: restores the working directory, receptor, ligands, "
+                                         "box and settings.")
+        self.project_open_btn.clicked.connect(self._open_project_dialog)
+        prow.addWidget(self.project_open_btn)
+        gl.addLayout(prow)
         lay.addWidget(g)
 
         g = QGroupBox("Opening .pdbqt files")
@@ -392,6 +409,110 @@ class VinaPilotXTool(ToolInstance):
                                              self._start_dir(self.workdir_edit.text()))
         if d:
             self.workdir_edit.setText(d)
+            self._workdir_changed()
+
+    # ---- project file ------------------------------------------------
+    def get_project(self):
+        """The Project of the working directory (None if no folder is set)."""
+        wd = self.workdir_edit.text().strip().strip('"')
+        if not wd:
+            return None
+        wd = os.path.abspath(wd)
+        if self._project is None or self._project.workdir != wd:
+            self._project = Project(wd)
+            self._project.load()
+        return self._project
+
+    def _workdir_changed(self):
+        proj = self.get_project()
+        if proj is None:
+            self.project_label.setText("")
+            return
+        self.protein.load_project()
+        if proj.loaded:
+            fresh = not self._records and not self.receptor_edit.text().strip()
+            self.project_label.setText("✔ Project file found (%d receptor revision(s))." % len(proj.revisions))
+            self.project_label.setStyleSheet(OK_STYLE)
+            if fresh:
+                self.restore_project(proj)
+        else:
+            self.project_label.setText("New project folder. A project.vinapx file will be saved here as you work.")
+            self.project_label.setStyleSheet("")
+
+    def save_project(self, last_run=None):
+        """Write the inputs, box and parameters into project.vinapx (never raises)."""
+        try:
+            proj = self.get_project()
+            if proj is None:
+                return False
+            from dataclasses import asdict
+            box = self.box_panel.current_box()
+            proj.set_inputs(ligand_paths=[r.path for r in self._records.values()], box=box,
+                            params=asdict(self._params()), last_run=last_run)
+            return proj.save(self.controller_version())
+        except Exception:
+            return False
+
+    @staticmethod
+    def controller_version():
+        return docking.TOOL_VERSION
+
+    def restore_project(self, proj):
+        """Bring the tool back to the state saved in *proj*."""
+        self.workdir_edit.setText(proj.workdir)
+        self._project = proj
+        self.protein.load_project()
+        pdbqt = proj.pdbqt()
+        if pdbqt:
+            self.receptor_edit.setText(pdbqt)
+            self._check_receptor()
+        paths = [p for p in proj.ligand_paths() if os.path.exists(p)]
+        if paths:
+            self._add_ligand_paths(paths)
+        box = proj.data.get("box")
+        if box:
+            try:
+                self.box_panel.set_box_from_cli(tuple(box["center"]), tuple(box["size"]), self.box_panel.spacing.value())
+            except Exception:
+                pass
+        self._apply_params(proj.data.get("params") or {})
+        self.project_label.setText("✔ Restored the project in %s (%d receptor revision(s), %d ligand(s))." % (
+            proj.workdir, len(proj.revisions), len(paths)))
+        self.project_label.setStyleSheet(OK_STYLE)
+        self.session.logger.info("Lattice VinaPilotX: restored the project in %s" % proj.workdir)
+
+    def open_project(self, path):
+        """Open a project.vinapx file (or a folder that contains one)."""
+        proj = Project.open(path)
+        self.restore_project(proj)
+        return proj
+
+    def _open_project_dialog(self):
+        p, _ = QFileDialog.getOpenFileName(self.tool_window.ui_area, "Open a project", self._start_dir(self.workdir_edit.text()),
+                                           "Lattice VinaPilotX project (*.vinapx);;All files (*)")
+        if p:
+            try:
+                self.open_project(p)
+            except Exception as err:
+                self.project_label.setText("✘ %s" % err)
+                self.project_label.setStyleSheet(BAD_STYLE)
+
+    def drop_prepared_receptor(self, reason):
+        """Clear the receptor field if it holds a receptor prepared by this tool, so a new protein is never mixed
+        up with an older one."""
+        cur = self.receptor_edit.text().strip().strip('"')
+        proj = self.get_project()
+        if not cur or proj is None:
+            return False
+        inside = os.path.normcase(os.path.abspath(cur)).startswith(
+            os.path.normcase(os.path.abspath(layout.path(proj.workdir, "prepared"))))
+        if not inside:
+            return False
+        self.receptor_edit.setText("")
+        self.receptor_status.setText("")
+        self._close_receptor_models()
+        self.session.logger.info("Lattice VinaPilotX: receptor cleared on the Inputs tab (%s)." % reason)
+        return True
 
     # ---- Inputs ------------------------------------------------------
     def _build_inputs_tab(self):
@@ -488,7 +609,19 @@ class VinaPilotXTool(ToolInstance):
         self.receptor_status.setStyleSheet(WARN_STYLE if warns else OK_STYLE)
         return True
 
+    def _schedule_project_save(self):
+        """Save the project a moment after the last change (several changes in a row give one write)."""
+        if getattr(self, "_save_pending", False):
+            return
+        self._save_pending = True
+
+        def go():
+            self._save_pending = False
+            self.save_project()
+        QTimer.singleShot(1500, go)
+
     def _receptor_chosen(self, open_model=False):
+        self._schedule_project_save()
         ok = self._check_receptor()
         path = self.receptor_edit.text().strip().strip('"')
         if ok and open_model and path:
@@ -570,6 +703,7 @@ class VinaPilotXTool(ToolInstance):
             self._add_ligand_paths([d])
 
     def _add_ligand_paths(self, paths):
+        self._schedule_project_save()
         existing = {r.key for r in self._records.values()}
         QGuiApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
@@ -799,6 +933,7 @@ class VinaPilotXTool(ToolInstance):
             QMessageBox.warning(self.tool_window.ui_area, "Lattice VinaPilotX – cannot start", str(result))
             return
         self._save_settings()
+        self.save_project(last_run={"workdir": workdir, "receptor": receptor, "ligands": len(records)})
         self.activity.clear()
         self.tabs.setCurrentIndex(5)
 
@@ -895,7 +1030,9 @@ class VinaPilotXTool(ToolInstance):
         self.receptor_edit.setText(s.get("last_receptor", "") or "")
         if self.receptor_edit.text():
             self._check_receptor()  # checked, but NOT opened until the user chooses it
-        p = s.get("params", {}) or {}
+        self._apply_params(s.get("params", {}) or {})
+
+    def _apply_params(self, p):
         self.exh_spin.setValue(int(p.get("exhaustiveness", DEFAULTS["exhaustiveness"])))
         self.modes_spin.setValue(int(p.get("num_modes", DEFAULTS["num_modes"])))
         self.erange_spin.setValue(float(p.get("energy_range", DEFAULTS["energy_range"])))
@@ -982,6 +1119,7 @@ class VinaPilotXTool(ToolInstance):
         self.tabs.setCurrentIndex(index)
 
     def delete(self):
+        self.save_project()
         self.controller.remove_listener(self._on_event)
         try:
             self.results.close()

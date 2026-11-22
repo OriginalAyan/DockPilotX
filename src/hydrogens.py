@@ -70,21 +70,48 @@ def _added_wrong_kind(model, before, want_nonpolar):
 
 
 def add_hydrogens(session, model, kind, log=None):
-    """kind: 'polar' (hydrogens on non-carbon atoms) or 'nonpolar' (on carbon). Returns (added, removed_wrong)."""
+    """kind: 'polar' (hydrogens on non-carbon atoms) or 'nonpolar' (on carbon).
+
+    ChimeraX may place hydrogens on every atom even when the command is restricted, so the result is sorted
+    afterwards. Returns {'placed': all hydrogens ChimeraX added, 'kept': of the wanted kind, 'removed': other kind}.
+    """
     say = log or (lambda m: None)
     nonpolar = kind == "nonpolar"
     spec = _spec(model)
     before = set(model.atoms)
-    n0 = len(before)
     part = "@@element_name=C" if nonpolar else "~@@element_name=C"
     try:
         run(session, "addh %s & %s" % (spec, part))
     except UserError as err:
         say("addh with an atom restriction was not accepted (%s); adding all hydrogens and removing the other kind." % err)
         run(session, "addh %s" % spec)
-    wrong = _delete_atoms(model, _added_wrong_kind(model, before, nonpolar))
-    added = len(model.atoms) - n0
-    return added, wrong
+    placed = sum(1 for a in model.atoms if a not in before and _is_h(a))
+    removed = _delete_atoms(model, _added_wrong_kind(model, before, nonpolar))
+    kept = placed - removed
+    other = "on N/O/S" if nonpolar else "on carbon"
+    say("ChimeraX placed %d hydrogens; kept %d %s; removed %d %s (not asked for here)." % (
+        placed, kept, "on carbon" if nonpolar else "on N/O/S", removed, other))
+    return {"placed": placed, "kept": kept, "removed": removed}
+
+
+def add_hydrogens_to_atoms(session, model, targets):
+    """Let ChimeraX protonate *targets* only: run addh, then delete every new hydrogen that is not bonded to
+    one of them. Returns the number of hydrogens kept."""
+    before = set(model.atoms)
+    tset = set(targets)
+    run(session, "addh %s" % _spec(model))
+    bad = []
+    for a in model.atoms:
+        if a in before or not _is_h(a):
+            continue
+        try:
+            ok = any(n in tset for n in a.neighbors)
+        except Exception:
+            ok = False
+        if not ok:
+            bad.append(a)
+    _delete_atoms(model, bad)
+    return sum(1 for t in targets for n in t.neighbors if _is_h(n))
 
 
 def remove_nonpolar(model):
@@ -96,3 +123,140 @@ def lacks_nonpolar(model):
     """True if the model has carbon atoms but no non-polar hydrogens (minimization needs them)."""
     polar, nonpolar = count_hydrogens(model)
     return nonpolar == 0
+
+
+# ---------------------------------------------------------------------------------------- chain ends
+def _bonded(res_a, res_b):
+    try:
+        c, n = res_a.find_atom("C"), res_b.find_atom("N")
+        return c is not None and n is not None and n in c.neighbors
+    except Exception:
+        return False
+
+
+def chain_ends(model):
+    """Chain ends of the protein chains of *model* as dicts {chain, kind 'N'|'C', number, real}.
+
+    An end is *real* only at the true start/end of the full sequence. Ends next to missing residues (known
+    from SEQRES, which ChimeraX reads) or next to a break in the chain are not real: they are artificial
+    cuts, like the ends of a chain taken from a larger protein. Without SEQRES nothing is known about missing
+    ends, so the ends of the resolved chain count as real (ChimeraX does the same).
+    """
+    ends = []
+    try:
+        chains = list(model.chains)
+    except Exception:
+        return ends
+    for ch in chains:
+        try:
+            rs = list(ch.residues)
+            cid = ch.chain_id
+        except Exception:
+            continue
+        n, i = len(rs), 0
+        while i < n:
+            if rs[i] is None:
+                i += 1
+                continue
+            j = i
+            while j + 1 < n and rs[j + 1] is not None and _bonded(rs[j], rs[j + 1]):
+                j += 1
+            ends.append({"chain": cid, "kind": "N", "number": rs[i].number, "real": i == 0})
+            ends.append({"chain": cid, "kind": "C", "number": rs[j].number, "real": j == n - 1})
+            i = j + 1
+    return ends
+
+
+def cooh_hydrogen_position(o, c, oxt, length=0.97, angle=107.0):
+    """Position for the acid hydrogen on OXT of a protonated C-terminus: cis to the carbonyl oxygen
+    (dihedral O=C-OXT-H = 0). *o*, *c*, *oxt* are xyz triples."""
+    import numpy as np
+    a, b, cc = (np.asarray(x, dtype=float) for x in (o, c, oxt))
+    bc = cc - b
+    bc /= np.linalg.norm(bc)
+    n = np.cross(b - a, bc)
+    n /= np.linalg.norm(n)
+    m = np.cross(n, bc)
+    th = np.radians(angle)
+    d = cc + length * (-np.cos(th) * bc - np.sin(th) * m)      # cis to the carbonyl oxygen
+    return d
+
+
+def _dihedral(p0, p1, p2, p3):
+    import numpy as np
+    b0, b1, b2 = (np.asarray(p1) - np.asarray(p0)), (np.asarray(p2) - np.asarray(p1)), (np.asarray(p3) - np.asarray(p2))
+    b1n = b1 / np.linalg.norm(b1)
+    v, w = b0 - np.dot(b0, b1n) * b1n, b2 - np.dot(b2, b1n) * b1n
+    return float(np.degrees(np.arctan2(np.dot(np.cross(b1n, v), w), np.dot(v, w))))
+
+
+def _coord(atom):
+    return [float(x) for x in atom.coord]
+
+
+def fix_termini(session, model, ends, rows, ph, log=None):
+    """Set the charge state of the chain ends after PDB2PQR (which keeps every end charged).
+
+    Real ends follow PROPKA: N-terminus NH3+ stays unless its pKa is below the pH (then NH2); C-terminus
+    COO- stays unless its pKa is above the pH (then COOH). Artificial ends (chain cut from a larger protein,
+    or next to a gap) become neutral like a chain-internal residue: the NH3+ hydrogens are replaced by
+    ChimeraX's amide hydrogen, and OXT is removed. *rows* are the PROPKA table rows. Returns
+    {(chain, number, 'N'|'C'): note}.
+    """
+    say = log or (lambda m: None)
+    notes = {}
+    by_key = {(r["chain"], r["number"], r["group"]): r for r in rows}
+    resmap = {}
+    try:
+        for r in model.residues:
+            resmap[(r.chain_id, r.number)] = r
+    except Exception:
+        return notes
+    for e in ends:
+        res = resmap.get((e["chain"], e["number"]))
+        if res is None:
+            continue
+        key = (e["chain"], e["number"], e["kind"])
+        label = "%s-terminus %s%d" % ("N" if e["kind"] == "N" else "C", e["chain"], e["number"])
+        try:
+            if e["kind"] == "N":
+                nat = res.find_atom("N")
+                if nat is None:
+                    continue
+                hs = sorted([a for a in nat.neighbors if _is_h(a)], key=lambda a: a.name)
+                if not e["real"]:
+                    _delete_atoms(model, hs)
+                    kept = add_hydrogens_to_atoms(session, model, [nat])
+                    if kept > 1:
+                        extra = sorted([a for a in nat.neighbors if _is_h(a)], key=lambda a: a.name)[1:]
+                        _delete_atoms(model, extra)
+                        say("%s: ChimeraX could not tell it is not a real end; kept a single amide hydrogen." % label)
+                    notes[key] = "not a real end: neutral amide (ChimeraX)"
+                else:
+                    row = by_key.get((e["chain"], e["number"], "N+"))
+                    if row and row["pka"] < ph and len(hs) >= 3:
+                        _delete_atoms(model, hs[-1:])
+                        notes[key] = "real end: neutral NH2 (pKa below pH)"
+                    else:
+                        notes[key] = "real end: charged NH3+ (PROPKA)"
+            else:
+                oxt = res.find_atom("OXT")
+                if not e["real"]:
+                    if oxt is not None:
+                        _delete_atoms(model, [a for a in oxt.neighbors if _is_h(a)] + [oxt])
+                    notes[key] = "not a real end: neutral (OXT removed)"
+                else:
+                    row = by_key.get((e["chain"], e["number"], "C-"))
+                    if row and row["pka"] > ph and oxt is not None and not any(_is_h(a) for a in oxt.neighbors):
+                        o, c = res.find_atom("O"), res.find_atom("C")
+                        pos = cooh_hydrogen_position(_coord(o), _coord(c), _coord(oxt))
+                        from chimerax.atomic.struct_edit import add_atom
+                        add_atom("HO", "H", res, pos, bonded_to=oxt)
+                        notes[key] = "real end: COOH (pKa above pH)"
+                    else:
+                        notes[key] = "real end: charged COO- (PROPKA)"
+        except Exception as err:
+            say("%s: could not adjust (%s)" % (label, err))
+            continue
+        say("%s: %s" % (label, notes[key]))
+    return notes

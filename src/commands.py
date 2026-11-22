@@ -11,6 +11,9 @@ from .controller import get_controller
 from .docking import DockingParams, SCORING_FUNCTIONS
 
 
+TABS = ["settings", "protein", "ligands", "inputs", "box", "run", "results"]
+
+
 def _tool(session, show=True):
     from chimerax.core import tools
     from .tool import VinaPilotXTool
@@ -23,11 +26,28 @@ def _tool(session, show=True):
 def cmd_gui(session, tab=None):
     tool = _tool(session)
     if tab is not None:
-        tool.show_tab(["settings", "prepare", "inputs", "box", "run", "results"].index(tab))
+        tool.show_tab(TABS.index(tab))
 
 
-gui_desc = CmdDesc(optional=[("tab", EnumOf(["settings", "prepare", "inputs", "box", "run", "results"]))],
+gui_desc = CmdDesc(optional=[("tab", EnumOf(TABS))],
                    synopsis="open the Lattice VinaPilotX window")
+
+
+def cmd_open(session, path):
+    """Open a project.vinapx file, or a folder that contains one."""
+    from .project import Project
+    path = os.path.expanduser(path)
+    if Project.locate(path) is None:
+        raise UserError("No project.vinapx found in %s" % path)
+    tool = _tool(session)
+    try:
+        proj = tool.open_project(path)
+    except Exception as err:
+        raise UserError("Could not open the project: %s" % err)
+    session.logger.info("Opened the Lattice VinaPilotX project in %s" % proj.workdir)
+
+
+open_desc = CmdDesc(required=[("path", StringArg)], synopsis="open a Lattice VinaPilotX project (.vinapx)")
 
 
 def cmd_vina(session, path=None, download=False):
@@ -140,6 +160,7 @@ pdbqt_desc = CmdDesc(keyword=[("native", BoolArg)],
 
 COMMANDS = {
     "vinax gui": (cmd_gui, gui_desc),
+    "vinax open": (cmd_open, open_desc),
     "vinax vina": (cmd_vina, vina_desc),
     "vinax box": (cmd_box, box_desc),
     "vinax run": (cmd_dock, dock_desc),

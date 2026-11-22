@@ -75,6 +75,25 @@ def strip_all_hydrogens(pdb_in, pdb_out):
     return n
 
 
+def copy_seqres(src_pdb, dst_pdb):
+    """Prepend the SEQRES records of *src_pdb* to *dst_pdb* (PDB2PQR drops all header records). ChimeraX uses
+    SEQRES to tell real chain ends from cut ones. Returns the number of records copied."""
+    try:
+        with open(src_pdb, encoding="utf-8", errors="replace") as f:
+            seq = [l for l in f if l.startswith("SEQRES")]
+        if not seq:
+            return 0
+        with open(dst_pdb, encoding="utf-8", errors="replace") as f:
+            body = f.read()
+        if "\nSEQRES" in "\n" + body:
+            return 0
+        with open(dst_pdb, "w", encoding="utf-8") as f:
+            f.write("".join(seq) + body)
+        return len(seq)
+    except OSError:
+        return 0
+
+
 def build_table(rows, before, after, ph):
     """Add flag, predicted charge state and the name PDB2PQR applied to each pKa row."""
     table = []

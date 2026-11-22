@@ -76,8 +76,10 @@ Pick a file or an already open model (a copy is used; your model is never change
    - **Add non-polar hydrogens (on carbon)**: `addh` restricted to carbon atoms; afterwards any hydrogen of the wrong kind that slipped in is deleted. A polar hydrogen you removed by hand is therefore never brought back. Docking does not need these (Meeko merges non-polar hydrogens); minimization does.
    - Meeko does **not** need hydrogens in its input: it adds polar hydrogens itself from the residue names. Choosing a mode here matters when you want specific protonation states, or a minimized structure.
    - **pKa table (PDB2PQR mode).** Shown in the tab, logged, and saved with the PDB2PQR log in `prepared/receptor/pdb2pqr/` (`<name>_pdb2pqr.log`, `<name>_pka.csv`). Columns: residue, pKa, model pKa, pKa − pH, predicted state, residue name applied, check. Rows whose pKa is within **±1** of the pH get a strong colour, within **±2** a soft one (red-orange vs yellow; dark fills with white text in the dark theme, light fills with black text in the light theme; the Check column says ±1 / ±2 as well). PROPKA is accurate to about one pKa unit (about 78-81 % of predictions within 1 unit, about half within 0.5 in a [published benchmark](https://pmc.ncbi.nlm.nih.gov/articles/PMC1513386/)), so **manual verification may be needed where the pKa is close to the pH**. The states are applied as PDB2PQR returns them; the ±1 / ±2 bands are this tool's convention, not a published rule.
-   - Not offered: PDB2PQR's neutral N-/C-terminus options (they need the PARSE force field). For a chain cut from a larger protein, the ChimeraX mode treats ends it can tell are artificial as non-terminal when the file has SEQRES.
-3. **Minimize (optional)** runs ChimeraX `minimize … dockPrep false maxSteps N logEnergy true` on the copy (default 100 steps; "until convergence" is slow and not recommended). Energies are written to the ChimeraX Log. The tool listens to ChimeraX's status line and, when it sees the minimization finish, writes **Minimization completed (final energy …)** to the Log and shows it in the tool; the button is a **Stop** button while it runs. Dock Prep is not repeated, so hydrogens and protonation stay as they are. Minimization works best with all hydrogens (the tool says so if non-polar ones are missing). Standard residues use the force field's own charges. *Completion is detected from ChimeraX's status text; if a future ChimeraX words it differently, press Stop and continue to step 4.*
+   - **Chain ends (PDB2PQR mode).** PDB2PQR keeps every end charged, so the tool checks each end afterwards. An end is *real* only at the true start/end of the sequence (ChimeraX reads SEQRES; PDB2PQR drops it, so the tool copies it back). Ends next to missing residues or a break are *cut* ends. Real ends follow PROPKA: N-terminus NH3+ unless its pKa is below the pH (then NH2); C-terminus COO- unless its pKa is above the pH (then COOH, hydrogen placed cis to the carbonyl). Cut ends become neutral like a chain-internal residue (ChimeraX places the single amide hydrogen on that N only; OXT is removed on the C side). Each decision is printed in the tool's log. Without SEQRES nothing is known about missing ends, so the ends of the resolved chain count as real. PDB2PQR's own neutral-terminus options need the PARSE force field and are not offered. *Not tested in real ChimeraX yet.*
+   - **Undo / Redo** (ChimeraX and PDB2PQR modes) swap the model between the checkpoint before and after the step; the same files are kept in the revision folder.
+   - **Counts.** ChimeraX `addh` can place hydrogens on every atom even when restricted, so the tool sorts the result and prints, in its own log, how many hydrogens ChimeraX placed, how many were kept and how many of the other kind were deleted.
+3. **Minimize (optional)** runs ChimeraX `minimize … dockPrep false maxSteps N logEnergy true` on the copy (default 100 steps; "until convergence" is slow and not recommended). Before it, the tool runs `addcharge` (ff14SB charges for standard residues) as a harmless safety step; Meeko computes its own charges later. ChimeraX reports energies only every 100 steps, so short runs show none; the tool echoes the energies it sees. ChimeraX prints "Minimization complete" to the **status line**, so the tool wraps the status line while minimizing (and restores it afterwards) to detect the end; it then writes **Minimization completed (last reported energy …)** to its log. The button is a **Stop** button while it runs. Dock Prep is not repeated, so hydrogens and protonation stay as they are. **Minimization needs the non-polar hydrogens too (step 2); they are not added automatically.** The force field is ChimeraX's Amber ff14SB (via OpenMM), a standard protein force field; other force fields may be added later. *Completion is detected from ChimeraX's status text; if a future ChimeraX words it differently, press Stop and continue to step 4.*
 4. **Convert with Meeko** saves the copy as `prepared/receptor/<name>_clean.pdb`, runs `mk_prepare_receptor -o <name> -p` and writes `prepared/receptor/<name>.pdbqt`. If a residue matches no Meeko template, it is retried **without its hydrogens** (Meeko then adds standard ones); residues that still fail are skipped (*Skip residues Meeko cannot handle*) and listed, because a skipped residue is missing from the receptor. The result is placed in the receptor field of the Inputs tab.
 
 ## 3. Ligands tab (SDF / MOL / MOL2 / SMILES → PDBQT)
@@ -193,21 +195,23 @@ If a ligand already has a result and a log in the working folder, it is reused (
 ## 8. Files written to the working directory
 
 ```
-prepared/receptor/         cleaned PDB and Meeko receptor PDBQT (Protein tab)
-prepared/receptor/pdb2pqr/ PDB2PQR output, log and pKa table (PDB2PQR mode)
-prepared/ligands/          Meeko ligand PDBQT files; prepared/staging/ holds the RDKit SDFs
-receptor/<name>.pdbqt      copy of the receptor used
-ligands/<name>.pdbqt       one file per ligand (libraries split)
-results/<name>_out.pdbqt   Vina poses (REMARK VINA RESULT lines give the affinities)
-logs/<name>.log            command line + Vina console output
+project.vinapx             small JSON manifest: receptor revisions and stages, ligand inputs, box, parameters, last run
+vinax_prepared/receptor/rNNN_<name>/   one folder per start from a protein: 01_clean.pdb, 02_hydrogens.pdb,
+                           03_minimized.pdb, 04_for_meeko.pdb, <name>.pdbqt, pdb2pqr/ (output, log, pKa table)
+vinax_prepared/ligands/    Meeko ligand PDBQT files; staging/ holds the RDKit SDFs
+vinax_receptor/<name>.pdbqt  copy of the receptor used
+vinax_ligands/<name>.pdbqt   one file per ligand (libraries split)
+vinax_results/<name>_out.pdbqt   Vina poses (REMARK VINA RESULT lines give the affinities)
+vinax_logs/<name>.log      command line + Vina console output
+(every vinax_ folder contains a note not to rename or edit it; old folders without the prefix are still read)
 vina_config.txt            box and search parameters shared by all ligands
 summary.csv                one row per POSE: ligand, pose, affinity, rmsd_lb, rmsd_ub, rating,
                            hbonds, hbonds_relaxed, clashes, hbond_partners, seed, status, error
 best_per_ligand.csv        one row per ligand (best affinity, poses, seed, status)
 run_log.txt                timestamped copy of the Run-tab log
 analysis.json              ratings, H-bond and clash results
-pose_cache/                saved H-bond/clash atom pairs per pose (deleting it loses only the drawing; counts stay in analysis.json)
-selected_poses/            written by "Save rated poses…"
+vinax_pose_cache/          saved H-bond/clash atom pairs per pose (deleting it loses only the drawing; counts stay in analysis.json)
+vinax_selected_poses/      written by "Save rated poses…"
 manifest.json              tool/Vina versions, receptor, box, parameters, seed policy and seeds,
                            an example command, status counts, Python/OS
 ```
@@ -226,6 +230,10 @@ Cite AutoDock Vina when you publish results: Trott & Olson, *J. Comput. Chem.* 2
 
 ---
 
+## Projects and `.vinapx`
+
+`project.vinapx` is written to the working directory and holds only a small manifest (paths relative to the folder, so it can be moved). Each time you press *Clean* a new **revision** is started; every later step saves a checkpoint, so you can close ChimeraX and continue from the latest step or reuse a finished PDBQT (Protein tab, *Saved preparations*). Clean hides the original model and shows the cleaned copy. Use **one working directory per docking project**; starting over with another protein makes a new revision, which becomes the active receptor, and the old receptor is cleared from the Inputs tab. Reopen a project with `open project.vinapx`, File > Open, drag and drop, `vinax open FOLDER_OR_FILE`, or *Open project…* on the Settings tab. *The `.vinapx` format registration is not tested in real ChimeraX yet.* A zip export of everything for sharing is planned as a separate file type.
+
 ## Commands
 
 ```
@@ -239,6 +247,7 @@ vinax run RECEPTOR ligands PATH workdir DIR
          [seed 0] [scoring vina|vinardo] [overwrite true] [recursive true]
          PATH = a file, a folder, a library file, or a wildcard such as C:/ligs/*.pdbqt
 vinax cancel                                    cancel the running job
+vinax open PATH                                 open a project.vinapx (or its folder)
 vinax pdbqt [native true|false]                 show/set the native .pdbqt opening override
 ```
 

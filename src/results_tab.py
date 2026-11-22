@@ -11,7 +11,7 @@ from Qt.QtWidgets import (
     QSpinBox, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
-from . import docking
+from . import docking, layout
 from .analysis_store import AnalysisStore
 from .pose_viewer import PoseViewer
 
@@ -122,7 +122,7 @@ class ResultsTab(QWidget):
         export.clicked.connect(self.export_csv)
         row.addWidget(export)
         save = QPushButton("Save rated poses…")
-        save.setToolTip("Copies poses at or above this rating (and a CSV) into selected_poses/.")
+        save.setToolTip("Copies poses at or above this rating (and a CSV) into vinax_selected_poses/.")
         save.clicked.connect(self.save_rated)
         row.addWidget(save)
         self.min_rating = QSpinBox()
@@ -343,8 +343,7 @@ class ResultsTab(QWidget):
         if not chosen:
             self.note.setText("No poses are rated %d★ or higher." % minimum)
             return
-        out_dir = os.path.join(self.workdir, "selected_poses")
-        os.makedirs(out_dir, exist_ok=True)
+        out_dir = layout.make(self.workdir, "selected")
         for n, p in chosen:
             docking.extract_pose(by_name[n].out_path, p, os.path.join(out_dir, "%s_pose%d.pdbqt" % (n, p)))
         wanted = set(chosen)
@@ -365,7 +364,7 @@ class ResultsTab(QWidget):
     def load_workdir(self, d):
         jobs = docking.load_results_dir(d)
         if not jobs:
-            self.note.setText("No Vina results found in %s/results" % d)
+            self.note.setText("No Vina results found in %s" % layout.existing(d, "results"))
             return False
         receptor = None
         try:
@@ -376,7 +375,7 @@ class ResultsTab(QWidget):
         except (OSError, ValueError):
             pass
         if receptor is None:
-            rdir = os.path.join(d, "receptor")
+            rdir = layout.existing(d, "receptor")
             if os.path.isdir(rdir):
                 for f in sorted(os.listdir(rdir)):
                     if f.lower().endswith(".pdbqt"):

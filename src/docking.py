@@ -17,10 +17,11 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, asdict
 
+from . import layout
 from .vina_manager import no_window_flags, check_vina
 from .pdbqt_tools import check_receptor_pdbqt, scan_ligands, stage_records, LigandRecord
 
-TOOL_VERSION = "0.8.0"
+TOOL_VERSION = "0.9.0"
 SCORING_FUNCTIONS = ("vina", "vinardo")
 VINA_VOLUME_WARN = 27000.0  # Å^3, Vina's own warning threshold
 
@@ -249,23 +250,23 @@ class DockingRunner:
     # ---- paths -----------------------------------------------------------
     @property
     def results_dir(self):
-        return os.path.join(self.workdir, "results")
+        return layout.path(self.workdir, "results")
 
     @property
     def logs_dir(self):
-        return os.path.join(self.workdir, "logs")
+        return layout.path(self.workdir, "logs")
 
     @property
     def ligands_dir(self):
-        return os.path.join(self.workdir, "ligands")
+        return layout.path(self.workdir, "ligands")
 
     # ---- preparation -----------------------------------------------------
     def prepare(self):
         """Create folders, stage receptor + ligands, write config. Returns job list."""
         import shutil
         for d in ("receptor", "ligands", "results", "logs"):
-            os.makedirs(os.path.join(self.workdir, d), exist_ok=True)
-        rec_dst = os.path.join(self.workdir, "receptor", os.path.basename(self.receptor_src))
+            layout.make(self.workdir, d)
+        rec_dst = os.path.join(layout.path(self.workdir, "receptor"), os.path.basename(self.receptor_src))
         if os.path.abspath(rec_dst) != self.receptor_src:
             shutil.copyfile(self.receptor_src, rec_dst)
         self.receptor = rec_dst
@@ -541,7 +542,7 @@ def seed_from_log(log_path):
 def load_results_dir(workdir):
     """Rebuild DockingJob objects from an existing working directory (for the Results tab)."""
     jobs = []
-    rdir = os.path.join(workdir, "results")
+    rdir = layout.existing(workdir, "results")
     if not os.path.isdir(rdir):
         return jobs
     for fn in sorted(os.listdir(rdir), key=str.lower):
@@ -550,8 +551,8 @@ def load_results_dir(workdir):
         name = fn[:-len("_out.pdbqt")]
         out = os.path.join(rdir, fn)
         poses = parse_vina_out(out)
-        job = DockingJob(name=name, ligand_path=os.path.join(workdir, "ligands", name + ".pdbqt"),
-                         out_path=out, log_path=os.path.join(workdir, "logs", name + ".log"))
+        job = DockingJob(name=name, ligand_path=os.path.join(layout.existing(workdir, "ligands"), name + ".pdbqt"),
+                         out_path=out, log_path=os.path.join(layout.existing(workdir, "logs"), name + ".log"))
         if poses:
             job.poses = list(poses)
             job.seed = seed_from_log(job.log_path)

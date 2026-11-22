@@ -6,6 +6,8 @@ Pure Python. File: <workdir>/analysis.json
 import json
 import os
 
+from . import layout
+
 FILENAME = "analysis.json"
 
 
@@ -72,7 +74,8 @@ class InteractionCache:
     """
 
     def __init__(self, workdir):
-        self.dir = os.path.join(workdir, "pose_cache")
+        self.workdir = workdir
+        self.dir = layout.existing(workdir, "cache")
 
     def path(self, ligand, pose):
         return os.path.join(self.dir, "%s_pose%d_interactions.json" % (ligand, pose))
@@ -91,6 +94,8 @@ class InteractionCache:
         d["version"] = 1
         d.update(fields)
         try:
+            if self.dir == layout.path(self.workdir, "cache"):
+                layout.make(self.workdir, "cache")
             os.makedirs(self.dir, exist_ok=True)
             p = self.path(ligand, pose)
             with open(p + ".tmp", "w", encoding="utf-8") as f:
