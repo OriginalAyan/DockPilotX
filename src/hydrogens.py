@@ -1,9 +1,8 @@
 """Add polar / non-polar hydrogens to a receptor model in ChimeraX.
 
-Polar hydrogens sit on N, O, S (and other non-carbon atoms); non-polar ones sit on carbon. ``addh`` is
-restricted to one kind of heavy atom ("only hydrogens bonded to the specified part will be added"), and the
-result is checked afterwards: a hydrogen of the wrong kind that still got added is deleted again, so a polar
-hydrogen you removed by hand is never brought back by the non-polar step.
+Polar hydrogens sit on N, O, S (and other non-carbon atoms); non-polar ones sit on carbon. ``addh`` cannot be
+restricted to one kind of atom, so the new hydrogens are sorted afterwards: those of the wrong kind are deleted
+again, so a polar hydrogen you removed by hand is never brought back by the non-polar step.
 """
 
 from chimerax.core.commands import run
@@ -72,25 +71,19 @@ def _added_wrong_kind(model, before, want_nonpolar):
 def add_hydrogens(session, model, kind, log=None):
     """kind: 'polar' (hydrogens on non-carbon atoms) or 'nonpolar' (on carbon).
 
-    ChimeraX may place hydrogens on every atom even when the command is restricted, so the result is sorted
-    afterwards. Returns {'placed': all hydrogens ChimeraX added, 'kept': of the wanted kind, 'removed': other kind}.
+    ChimeraX ``addh`` takes whole structures only (an atom restriction is refused), so it always places every
+    missing hydrogen and the result is sorted afterwards: hydrogens of the other kind are deleted again.
+    Returns {'placed': all hydrogens ChimeraX added, 'kept': of the wanted kind, 'removed': other kind}.
     """
     say = log or (lambda m: None)
     nonpolar = kind == "nonpolar"
-    spec = _spec(model)
     before = set(model.atoms)
-    part = "@@element_name=C" if nonpolar else "~@@element_name=C"
-    try:
-        run(session, "addh %s & %s" % (spec, part))
-    except UserError as err:
-        say("addh with an atom restriction was not accepted (%s); adding all hydrogens and removing the other kind." % err)
-        run(session, "addh %s" % spec)
+    run(session, "addh %s" % _spec(model))
     placed = sum(1 for a in model.atoms if a not in before and _is_h(a))
     removed = _delete_atoms(model, _added_wrong_kind(model, before, nonpolar))
     kept = placed - removed
-    other = "on N/O/S" if nonpolar else "on carbon"
-    say("ChimeraX placed %d hydrogens; kept %d %s; removed %d %s (not asked for here)." % (
-        placed, kept, "on carbon" if nonpolar else "on N/O/S", removed, other))
+    say("ChimeraX placed %d hydrogens (addh cannot be limited to one kind); kept %d %s; removed %d %s (not asked for here)." % (
+        placed, kept, "on carbon" if nonpolar else "on N/O/S", removed, "on N/O/S" if nonpolar else "on carbon"))
     return {"placed": placed, "kept": kept, "removed": removed}
 
 

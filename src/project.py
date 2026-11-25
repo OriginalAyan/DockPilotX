@@ -115,7 +115,7 @@ class Project:
         """Start a new receptor revision; it becomes the active one. Its folder is created."""
         n = 1 + max([int(r["id"][1:]) for r in self.revisions] or [0])
         rev = {"id": "r%03d" % n, "name": name, "source": source, "created": _now(), "options": options or {},
-               "stages": {}, "hydrogens": {}, "note": ""}
+               "stages": {}, "hydrogens": {}, "note": "", "approved": False}
         self.revisions.append(rev)
         self.data["receptor"]["active"] = rev["id"]
         os.makedirs(self.rev_dir(rev), exist_ok=True)
@@ -132,6 +132,7 @@ class Project:
         """Record that *stage* of *rev* finished and its file is *path*. Later stages become invalid for
         stages that depend on this one (minimized needs hydrogens, hydrogens needs clean)."""
         rev["stages"][stage] = dict(info, file=self.rel(path), time=_now())
+        rev["approved"] = False         # a changed structure or a new conversion must be approved again
         order = list(STAGES)
         for later in order[order.index(stage) + 1:]:
             rev["stages"].pop(later, None)
@@ -150,6 +151,20 @@ class Project:
             return None
         s = rev["stages"].get("pdbqt")
         return self.abs(s["file"]) if s and os.path.isfile(self.abs(s["file"])) else None
+
+    def approve(self, rev, flag=True):
+        """Mark the PDBQT of *rev* as approved for docking (only approved ones are offered on the Inputs tab)."""
+        rev["approved"] = bool(flag) and self.pdbqt(rev) is not None
+        return rev["approved"]
+
+    def approved(self):
+        """[(revision, absolute pdbqt path)] of the approved receptors whose file still exists."""
+        out = []
+        for r in self.revisions:
+            p = self.pdbqt(r)
+            if r.get("approved") and p:
+                out.append((r, p))
+        return out
 
     def summary(self, rev):
         marks = []

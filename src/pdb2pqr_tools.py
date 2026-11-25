@@ -94,6 +94,46 @@ def copy_seqres(src_pdb, dst_pdb):
         return 0
 
 
+FLIP_ATOMS = {"ASN": ("OD1", "ND2"), "GLN": ("OE1", "NE2"), "HIS": ("ND1", "CD2", "CE1", "NE2"),
+              "HID": ("ND1", "CD2", "CE1", "NE2"), "HIE": ("ND1", "CD2", "CE1", "NE2"),
+              "HIP": ("ND1", "CD2", "CE1", "NE2")}
+
+
+def _side_chain_atoms(pdb_path):
+    out = {}
+    try:
+        with open(pdb_path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if line.startswith(("ATOM", "HETATM")) and len(line) > 54:
+                    res = line[17:20].strip()
+                    name = line[12:16].strip()
+                    if name in FLIP_ATOMS.get(res, ()):
+                        key = (line[21].strip() or " ", int(line[22:26]), res)
+                        out.setdefault(key[:2], {"res": res, "atoms": {}})["atoms"][name] = (
+                            float(line[30:38]), float(line[38:46]), float(line[46:54]))
+    except (OSError, ValueError):
+        pass
+    return out
+
+
+def find_flips(before_pdb, after_pdb, min_shift=1.0):
+    """Asn / Gln / His side chains whose terminal atoms moved by more than *min_shift* Å: PDB2PQR flipped them to
+    improve hydrogen bonding. Returns [(label, shift)], e.g. [('ASN A6', 2.4)]. Residue names are compared by
+    number, so a His renamed HID/HIE/HIP is still found. Atom names that PDB2PQR merely swaps (Asp/Glu) are not
+    looked at."""
+    a, b = _side_chain_atoms(before_pdb), _side_chain_atoms(after_pdb)
+    flips = []
+    for key, ra in a.items():
+        rb = b.get(key)
+        if not rb:
+            continue
+        shifts = [sum((x - y) ** 2 for x, y in zip(p, rb["atoms"][n])) ** 0.5
+                  for n, p in ra["atoms"].items() if n in rb["atoms"]]
+        if shifts and max(shifts) > min_shift:
+            flips.append(("%s %s%d" % (ra["res"], key[0], key[1]), max(shifts)))
+    return flips
+
+
 def build_table(rows, before, after, ph):
     """Add flag, predicted charge state and the name PDB2PQR applied to each pKa row."""
     table = []
@@ -111,7 +151,8 @@ def build_table(rows, before, after, ph):
         row = dict(r)
         row.update({"residue": residue, "delta": r["pka"] - ph, "flag": classify(r["pka"], ph),
                     "predicted": predicted, "acidic": acidic,
-                    "renamed": ("%s → %s" % (old, new)) if old and new and old != new else ""})
+                    "renamed": ("%s → %s" % (old, new)) if old and new and old != new and r["group"] not in ("N+", "C-")
+                    else ""})
         table.append(row)
     return table
 
@@ -163,4 +204,4 @@ def run_pdb2pqr(env, in_pdb, out_dir, base, ph, log=None, cancelled=None, timeou
     write_pka_csv(csv_path, table, ph)
     renamed = [r["residue"] + ": " + r["renamed"] for r in table if r["renamed"]]
     return {"pdb": out_pdb, "table": table, "renamed": renamed, "log_path": log_path, "csv_path": csv_path,
-            "ph": ph, "log_text": text, "removed_h": removed}
+            "ph": ph, "log_text": text, "removed_h": removed, "flips": find_flips(heavy, out_pdb)}

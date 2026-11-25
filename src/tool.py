@@ -429,6 +429,7 @@ class VinaPilotXTool(ToolInstance):
             self.project_label.setText("")
             return
         self.protein.load_project()
+        self.refresh_prepared_list()
         if proj.loaded:
             fresh = not self._records and not self.receptor_edit.text().strip()
             self.project_label.setText("✔ Project file found (%d receptor revision(s))." % len(proj.revisions))
@@ -447,8 +448,11 @@ class VinaPilotXTool(ToolInstance):
                 return False
             from dataclasses import asdict
             box = self.box_panel.current_box()
-            proj.set_inputs(ligand_paths=[r.path for r in self._records.values()], box=box,
+            srcs = list(dict.fromkeys(r.source for r in self._records.values()))      # a library file is listed once
+            proj.set_inputs(ligand_paths=srcs, box=box,
                             params=asdict(self._params()), last_run=last_run)
+            cur = self.receptor_edit.text().strip().strip('"')
+            proj.data["receptor"]["selected"] = proj.rel(cur) if cur else ""
             return proj.save(self.controller_version())
         except Exception:
             return False
@@ -462,10 +466,12 @@ class VinaPilotXTool(ToolInstance):
         self.workdir_edit.setText(proj.workdir)
         self._project = proj
         self.protein.load_project()
-        pdbqt = proj.pdbqt()
-        if pdbqt:
-            self.receptor_edit.setText(pdbqt)
+        self.refresh_prepared_list()
+        sel = proj.abs(proj.data["receptor"].get("selected") or "")
+        if sel and os.path.isfile(sel):
+            self.receptor_edit.setText(sel)
             self._check_receptor()
+            self.refresh_prepared_list()
         paths = [p for p in proj.ligand_paths() if os.path.exists(p)]
         if paths:
             self._add_ligand_paths(paths)
@@ -497,6 +503,30 @@ class VinaPilotXTool(ToolInstance):
                 self.project_label.setText("✘ %s" % err)
                 self.project_label.setStyleSheet(BAD_STYLE)
 
+    def refresh_prepared_list(self):
+        """List the receptors approved on the Protein tab (and nothing else)."""
+        proj = self.get_project()
+        self._approved = proj.approved() if proj else []
+        self.prepared_combo.clear()
+        if not self._approved:
+            self.prepared_combo.addItem("(no approved receptor yet: approve one on the Protein tab, or load a file)")
+            return
+        self.prepared_combo.addItem("(choose an approved receptor)")
+        for rev, path in self._approved:
+            self.prepared_combo.addItem("%s  %s  (%s)" % (rev["id"], rev["name"], os.path.basename(path)))
+        cur = os.path.normcase(os.path.abspath(self.receptor_edit.text().strip().strip('"') or "."))
+        for i, (_, p) in enumerate(self._approved):
+            if os.path.normcase(os.path.abspath(p)) == cur:
+                self.prepared_combo.setCurrentIndex(i + 1)
+
+    def _prepared_picked(self, index):
+        if 1 <= index <= len(getattr(self, "_approved", [])):
+            rev, path = self._approved[index - 1]
+            proj = self.get_project()
+            proj.data["receptor"]["active"] = rev["id"]
+            self.receptor_edit.setText(path)
+            self._receptor_chosen(open_model=True)
+
     def drop_prepared_receptor(self, reason):
         """Clear the receptor field if it holds a receptor prepared by this tool, so a new protein is never mixed
         up with an older one."""
@@ -521,6 +551,10 @@ class VinaPilotXTool(ToolInstance):
 
         g = QGroupBox("Receptor (prepared .pdbqt)")
         gl = QVBoxLayout(g)
+        self.prepared_combo = QComboBox()
+        self.prepared_combo.setToolTip("Receptors approved on the Protein tab. Or load any PDBQT file below.")
+        self.prepared_combo.activated.connect(self._prepared_picked)
+        gl.addWidget(self.prepared_combo)
         self.receptor_edit = QLineEdit()
         self.receptor_edit.setPlaceholderText("Prepared receptor PDBQT file")
         self.receptor_edit.editingFinished.connect(lambda: self._receptor_chosen(open_model=True))
@@ -1120,6 +1154,10 @@ class VinaPilotXTool(ToolInstance):
 
     def delete(self):
         self.save_project()
+        try:
+            self.protein.cleanup()
+        except Exception:
+            pass
         self.controller.remove_listener(self._on_event)
         try:
             self.results.close()

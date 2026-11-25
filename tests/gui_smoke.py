@@ -23,7 +23,7 @@ class Model:
         if getattr(self.session, 'models', None) and self in self.session.models.items: self.session.models.items.remove(self)
 class Surface(Model):
     def set_geometry(self, *a): pass
-mod("chimerax"); mod("chimerax.core"); mod("chimerax.core.models", Model=Model, Surface=Surface, MODEL_COLOR_CHANGED="mcc")
+mod("chimerax"); mod("chimerax.core"); mod("chimerax.core.models", Model=Model, Surface=Surface, MODEL_COLOR_CHANGED="mcc", ADD_MODELS="am", REMOVE_MODELS="rm")
 mod("chimerax.surface"); mod("chimerax.surface.shapes", cylinder_geometry=lambda **k: (np.zeros((4,3)), np.zeros((4,3)), np.zeros((2,3), int)))
 class UndoAction:
     def __init__(self, name): self.name = name
@@ -150,7 +150,8 @@ class Tools:
     items = []
     def list(self): return [t for t in self.items if not t.deleted]
 session.tools = Tools()
-session.triggers = types.SimpleNamespace(add_handler=lambda *a: 1, remove_handler=lambda h: None)
+_handlers = []
+session.triggers = types.SimpleNamespace(add_handler=lambda name, fn: (_handlers.append((name, fn)), len(_handlers))[1], remove_handler=lambda h: _handlers.append(('removed', h)))
 
 class Formats:
     class settings:
@@ -406,24 +407,18 @@ class FM:
 fm = FM(); C1, N1, O1 = FA("C"), FA("N"), FA("O"); fm._atoms = [C1, N1, O1]; fm._atoms.append(FA("H", N1))      # one polar H present
 cmds_h = []
 def fake_addh(sess, text, _m=fm):
-    cmds_h.append(text)
-    if "~@@element_name=C" in text: _m._atoms += [FA("H", O1), FA("H", C1)]      # leaks one wrong-kind H
-    elif "@@element_name=C" in text: _m._atoms += [FA("H", C1), FA("H", C1), FA("H", N1)]
+    cmds_h.append(text)                            # addh cannot be limited: it places a polar and a carbon hydrogen
+    _m._atoms += [FA("H", O1), FA("H", C1)]
 hy.run = fake_addh
 assert hy.count_hydrogens(fm) == (1, 0) and hy.lacks_nonpolar(fm)
 logs_h = []
-d = hy.add_hydrogens(session, fm, "polar", logs_h.append); assert cmds_h[-1] == "addh #7 & ~@@element_name=C" and d == {"placed": 2, "kept": 1, "removed": 1}, d
-assert "placed 2 hydrogens; kept 1 on N/O/S; removed 1 on carbon" in logs_h[-1], logs_h       # what the tool says in its own log
+d = hy.add_hydrogens(session, fm, "polar", logs_h.append); assert cmds_h[-1] == "addh #7" and d == {"placed": 2, "kept": 1, "removed": 1}, d
+assert "placed 2 hydrogens" in logs_h[-1] and "kept 1 on N/O/S" in logs_h[-1] and "removed 1 on carbon" in logs_h[-1], logs_h       # in the tool's own log
 assert hy.count_hydrogens(fm) == (2, 0)
-d = hy.add_hydrogens(session, fm, "nonpolar", logs_h.append); assert cmds_h[-1] == "addh #7 & @@element_name=C" and d == {"placed": 3, "kept": 2, "removed": 1}, d
-assert "kept 2 on carbon; removed 1 on N/O/S" in logs_h[-1]
-assert hy.count_hydrogens(fm) == (2, 2) and not hy.lacks_nonpolar(fm)
-assert hy.remove_nonpolar(fm) == 2 and hy.count_hydrogens(fm) == (2, 0)
-def refusing(sess, text):
-    if "&" in text: raise UserError("bad spec")
-    cmds_h.append(text); fm._atoms += [FA("H", C1), FA("H", N1)]
-hy.run = refusing; n0 = hy.count_hydrogens(fm)
-d = hy.add_hydrogens(session, fm, "nonpolar"); assert d == {"placed": 2, "kept": 1, "removed": 1} and hy.count_hydrogens(fm) == (n0[0], n0[1] + 1)
+d = hy.add_hydrogens(session, fm, "nonpolar", logs_h.append); assert d == {"placed": 2, "kept": 1, "removed": 1}, d
+assert "kept 1 on carbon; removed 1 on N/O/S" in logs_h[-1], logs_h[-1]
+assert hy.count_hydrogens(fm) == (2, 1) and not hy.lacks_nonpolar(fm)     # the removed polar hydrogen did not come back
+assert hy.remove_nonpolar(fm) == 1 and hy.count_hydrogens(fm) == (2, 0)
 
 # ---- chain ends: real versus cut, and what is done to each
 import numpy as np
@@ -569,5 +564,34 @@ tool.receptor_edit.setText("/somewhere/else/my.pdbqt"); assert not tool.drop_pre
 txt = """x\nSUMMARY OF THIS PREDICTION\n       Group      pKa  model-pKa   ligand atom-type\n   ASP   4 A     3.94       3.80                      \n   N+    1 A     7.68       8.00                      \n\nINFO:next"""
 got = pq.parse_pka_summary(txt); assert [(g["group"], g["number"], g["pka"]) for g in got] == [("ASP", 4, 3.94), ("N+", 1, 7.68)]
 assert pq.classify(7.0, 7.4) == "close" and pq.classify(5.5, 7.4) == "near" and pq.classify(3, 7.4) == ""
+
+# ---- approval flow: Meeko result is NOT put on the Inputs tab until the user approves it
+tool.receptor_edit.setText(""); proj = tool.get_project()
+rev = proj.new_revision("appr", "x.pdb"); q = proj.stage_file(rev, "clean").replace("01_clean.pdb", "appr.pdbqt"); open(q, "w").write("x")
+proj.set_stage(rev, "pdbqt", q); proj.save(); P._rev = rev; P._convert_rev = rev; P.load_project(); tool.refresh_prepared_list()
+assert tool.receptor_edit.text() == "" and not proj.approved() and tool.prepared_combo.count() == 1 and not tool._approved
+assert P.approve_btn.isEnabled() and P.approve_btn.text() == "Approve for docking"
+P._toggle_approve()
+assert proj.approved()[0][1] == q and tool.prepared_combo.count() == 2 and P.approve_btn.text() == "Remove approval"
+assert not hasattr(P, "rev_use_btn")
+tool._receptor_chosen = lambda open_model=False: None
+tool._prepared_picked(1); assert tool.receptor_edit.text() == q
+assert tool.save_project(); _saved = Project.open(proj.workdir).data
+assert _saved["receptor"]["selected"].endswith("appr.pdbqt") and _saved["params"] and \
+    _saved["ligands"]["inputs"] == [os.path.relpath(x, proj.workdir).replace("\\", "/") if not os.path.relpath(x, proj.workdir).startswith("..") else x for x in dict.fromkeys(r.source for r in tool._records.values())]
+proj.set_stage(rev, "pdbqt", q); assert not rev["approved"]       # a new conversion has to be approved again
+tool.receptor_edit.setText("")
+
+# ---- open-model list follows ChimeraX while the window stays open
+calls = []; P.refresh_models = lambda: calls.append(1)
+names = [n for n, f in _handlers if n in ("am", "rm")]; assert names == ["am", "rm"], _handlers
+for n, f in list(_handlers):
+    if n in ("am", "rm"): f(n, []); f(n, [])
+from Qt.QtWidgets import QApplication
+QApplication.processEvents(); QApplication.processEvents()
+assert len(calls) == 1, "two quick model changes must give one refresh"
+import chimerax.vinapilotx.protein_tab as ptab
+assert ptab.stem("1asd.pdb") == "1asd" and ptab.stem("x.CIF") == "x" and ptab.stem("a.b.c") == "a.b.c"
+P.cleanup(); assert [h for h in _handlers if h[0] == "removed"]
 
 tool.delete(); print("GUI SMOKE OK")

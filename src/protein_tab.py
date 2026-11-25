@@ -13,6 +13,8 @@ from Qt.QtWidgets import (
     QProgressBar, QPushButton, QSpinBox, QVBoxLayout, QWidget,
 )
 
+import re
+
 from . import layout, prep_undo
 from .pdbqt_tools import safe_name
 from .prep_widgets import BAD_STYLE, OK_STYLE, WARN_STYLE, EnvBanner, PkaTable
@@ -24,6 +26,11 @@ POLAR_MODES = [
     ("ChimeraX (residue names, else H-bond method)", "chimerax"),
     ("PDB2PQR + PROPKA at pH", "pdb2pqr"),
 ]
+
+
+def stem(name):
+    """Model name without a file extension ('cleaned.pdb' -> 'cleaned')."""
+    return re.sub(r"\.(pdb|ent|cif|mmcif|pdbqt|mol2|sdf)$", "", str(name or ""), flags=re.I)
 
 
 def _small_note(text):
@@ -50,8 +57,43 @@ class ProteinTab(QWidget):
         self._h_in_pdb = None
         self._swap_state = None
         self._convert_rev = None
+        self._handlers = []
+        self._refresh_pending = False
         self._build_ui()
         self.refresh_env()
+        self._hook_models()
+        self.refresh_models()
+
+    # keep the 'Use open model' list current while the window stays open
+    def _hook_models(self):
+        try:
+            from chimerax.core.models import ADD_MODELS, REMOVE_MODELS
+            trig = self.session.triggers
+            for name in (ADD_MODELS, REMOVE_MODELS):
+                self._handlers.append(trig.add_handler(name, self._models_changed))
+        except Exception:
+            self._handlers = []
+
+    def _models_changed(self, *_):
+        if self._refresh_pending:
+            return
+        self._refresh_pending = True
+        QTimer.singleShot(0, self._deferred_refresh)
+
+    def _deferred_refresh(self):
+        self._refresh_pending = False
+        try:
+            self.refresh_models()
+        except RuntimeError:      # the window is already gone
+            pass
+
+    def cleanup(self):
+        for h in self._handlers:
+            try:
+                self.session.triggers.remove_handler(h)
+            except Exception:
+                pass
+        self._handlers = []
 
     # ------------------------------------------------------------------ UI
     def _build_ui(self):
@@ -68,11 +110,8 @@ class ProteinTab(QWidget):
         self.rev_continue_btn = QPushButton("Continue from latest step")
         self.rev_continue_btn.setToolTip("Opens the last saved structure of this revision so you can carry on.")
         self.rev_continue_btn.clicked.connect(self._continue_revision)
-        self.rev_use_btn = QPushButton("Use its PDBQT")
-        self.rev_use_btn.setToolTip("Puts the converted receptor of this revision on the Inputs tab.")
-        self.rev_use_btn.clicked.connect(self._use_revision_pdbqt)
         row.addWidget(self.rev_continue_btn)
-        row.addWidget(self.rev_use_btn)
+        row.addStretch(1)
         gl.addLayout(row)
         self.rev_label = QLabel("")
         self.rev_label.setWordWrap(True)
@@ -90,11 +129,16 @@ class ProteinTab(QWidget):
         row.addWidget(b)
         gl.addLayout(row)
         row = QHBoxLayout()
-        row.addWidget(QLabel("or open model"))
+        row.addWidget(QLabel("Use open model:"))
         self.model_combo = QComboBox()
         self.model_combo.setToolTip("Prepare a copy of a model that is already open. The model itself is not changed "
                                     "(it is hidden while the copy is shown).")
         row.addWidget(self.model_combo, 1)
+        self.model_refresh_btn = QPushButton("⟳")
+        self.model_refresh_btn.setFixedWidth(32)
+        self.model_refresh_btn.setToolTip("Refresh the list of open models.")
+        self.model_refresh_btn.clicked.connect(lambda: self.refresh_models())
+        row.addWidget(self.model_refresh_btn)
         gl.addLayout(row)
         self.chains_edit = QLineEdit()
         self.chains_edit.setPlaceholderText("Keep only chains, e.g. A,B (blank = all)")
@@ -224,6 +268,11 @@ class ProteinTab(QWidget):
                                  "If step 1 was not run, it is run first.")
         self.conv_btn.clicked.connect(self._convert_receptor)
         gl.addWidget(self.conv_btn)
+        self.approve_btn = QPushButton("Approve for docking")
+        self.approve_btn.setToolTip("Only approved receptors are listed on the Inputs tab. Inspect the Meeko result first.")
+        self.approve_btn.setEnabled(False)
+        self.approve_btn.clicked.connect(self._toggle_approve)
+        gl.addWidget(self.approve_btn)
         self.rec_result = QLabel("")
         self.rec_result.setWordWrap(True)
         gl.addWidget(self.rec_result)
@@ -265,17 +314,27 @@ class ProteinTab(QWidget):
         self.log.appendPlainText(str(text))
 
     def refresh_models(self):
-        """List open atomic models for 'or open model'."""
+        """List the open atomic models for 'Use open model' and keep the current choice if it is still open."""
+        keep = None
+        i = self.model_combo.currentIndex()
+        if 0 < i < len(self._model_ids):
+            keep = self._model_ids[i]
+        self.model_combo.blockSignals(True)
         self.model_combo.clear()
-        self.model_combo.addItem("(use the file above)")
+        self.model_combo.addItem("(none: use the file above)")
         self._model_ids = [None]
         try:
             from chimerax.atomic import AtomicStructure
             for m in self.session.models.list(type=AtomicStructure):
+                if getattr(m, "deleted", False):
+                    continue
                 self.model_combo.addItem("#%s  %s" % (".".join(str(i) for i in m.id), m.name))
                 self._model_ids.append(m)
         except Exception:
             pass
+        if keep is not None and keep in self._model_ids:
+            self.model_combo.setCurrentIndex(self._model_ids.index(keep))
+        self.model_combo.blockSignals(False)
 
     def _polar_changed(self, *_):
         self.ph_spin.setEnabled(self.polar_combo.currentData() == "pdb2pqr")
@@ -297,7 +356,7 @@ class ProteinTab(QWidget):
                 self.rev_combo.setCurrentIndex(i)
         self.rev_label.setText("" if revs else "None yet. Step 1 starts the first one.")
         self.rev_continue_btn.setEnabled(bool(revs))
-        self.rev_use_btn.setEnabled(bool(revs))
+        self._update_approve()
 
     def _selected_revision(self):
         proj = self._project()
@@ -320,6 +379,7 @@ class ProteinTab(QWidget):
             self._fail("Could not open %s: %s" % (path, err))
             return
         self._rev, self._prep_name = rev, rev["name"]
+        self._update_approve()
         proj.data["receptor"]["active"] = rev["id"]
         proj.save()
         self.pka_table.setVisible(False)
@@ -327,20 +387,27 @@ class ProteinTab(QWidget):
         self.rec_result.setStyleSheet(OK_STYLE)
         self.log_line("Opened %s (%s step) as %s_prep." % (os.path.basename(path), stage, rev["name"]))
 
-    def _use_revision_pdbqt(self):
-        proj, rev = self._selected_revision()
-        if rev is None:
+    def _update_approve(self):
+        """Approve button: enabled when the active revision has a converted PDBQT."""
+        proj, rev = self._project(), self._rev
+        ok = bool(proj and rev and proj.pdbqt(rev))
+        self.approve_btn.setEnabled(ok)
+        self.approve_btn.setText("Remove approval" if ok and rev.get("approved") else "Approve for docking")
+
+    def _toggle_approve(self):
+        proj, rev = self._project(), self._rev
+        if not (proj and rev and proj.pdbqt(rev)):
             return
-        p = proj.pdbqt(rev)
-        if not p:
-            self._fail("This revision has not been converted yet. Run step 4 on it.")
-            return
-        proj.data["receptor"]["active"] = rev["id"]
+        now = proj.approve(rev, not rev.get("approved"))
         proj.save()
-        self.host.receptor_edit.setText(p)
-        self.host._receptor_chosen(open_model=True)
-        self.rec_result.setText("✔ %s is now the receptor on the Inputs tab." % os.path.basename(p))
-        self.rec_result.setStyleSheet(OK_STYLE)
+        self._update_approve()
+        self.host.refresh_prepared_list()
+        if now:
+            self.rec_result.setText("✔ %s approved: it is now in the receptor list on the Inputs tab." % os.path.basename(proj.pdbqt(rev)))
+            self.rec_result.setStyleSheet(OK_STYLE)
+        else:
+            self.rec_result.setText("Approval removed. It is no longer in the receptor list on the Inputs tab.")
+            self.rec_result.setStyleSheet("")
 
     def _checkpoint(self, stage, **info):
         """Save the current copy as the checkpoint of *stage* and record it in the project file."""
@@ -378,7 +445,7 @@ class ProteinTab(QWidget):
         if 0 < idx < len(self._model_ids):
             from chimerax.core.commands import run
             m = self._model_ids[idx]
-            name = safe_name(m.name) or "receptor"
+            name = safe_name(stem(m.name)) or "receptor"
             src_dir = os.path.join(layout.make(wd, "prepared"), "sources")
             os.makedirs(src_dir, exist_ok=True)
             source = os.path.join(src_dir, name + "_source.pdb")
@@ -431,8 +498,6 @@ class ProteinTab(QWidget):
         self._prep_model, self._prep_name = model, name
         self._rev = proj.new_revision(name, proj.rel(source) if orig is None else "open model " + str(orig.name), options)
         self._checkpoint("clean")
-        # a new protein must never be mixed up with the receptor of an earlier revision
-        self.host.drop_prepared_receptor("a new receptor preparation was started (%s)" % self._rev["id"])
         if orig is not None and not getattr(orig, "deleted", False):
             try:
                 orig.display = False
@@ -559,6 +624,13 @@ class ProteinTab(QWidget):
                 self.log_line("%-16s pKa %6.2f  (model %5.2f)  %+5.2f  %s%s" % (
                     r["residue"], r["pka"], r["model_pka"], r["delta"], r["predicted"],
                     "   <-- within ±%d of the pH" % (1 if r["flag"] == "close" else 2) if r["flag"] else ""))
+            flips = res.get("flips") or []
+            if flips:
+                self.log_line("Flipped by PDB2PQR (hydrogen-bond optimisation): " + ", ".join(
+                    "%s (%.1f Å)" % f for f in flips) + ". ChimeraX's own mode never flips. Check them in the scene.")
+                notes.append("flipped: " + ", ".join(f[0] for f in flips))
+            else:
+                self.log_line("PDB2PQR flipped no Asn / Gln / His side chain.")
             self.log_line("Log: %s" % res["log_path"])
             self.log_line("Table: %s" % res["csv_path"])
             self._finish_hydrogens(notes, "pdb2pqr")
@@ -720,5 +792,6 @@ class ProteinTab(QWidget):
                 self._prep_model.display = False
             except Exception:
                 pass
-        self.host.receptor_edit.setText(path)
-        self.host._receptor_chosen(open_model=True)
+        text_extra = "\nCheck the result, then press \"Approve for docking\" to offer it on the Inputs tab."
+        self.rec_result.setText(self.rec_result.text() + text_extra)
+        self._update_approve()
