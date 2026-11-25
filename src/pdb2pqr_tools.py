@@ -149,10 +149,13 @@ def build_table(rows, before, after, ph):
         else:
             residue = "%s %s%d" % (r["group"], r["chain"], r["number"])
         row = dict(r)
+        kept_note = ""
+        if r["group"] == "TYR" and deprot and not (old and new and old != new):
+            kept_note = "kept TYR (no deprotonated form in AMBER)"
         row.update({"residue": residue, "delta": r["pka"] - ph, "flag": classify(r["pka"], ph),
                     "predicted": predicted, "acidic": acidic,
                     "renamed": ("%s → %s" % (old, new)) if old and new and old != new and r["group"] not in ("N+", "C-")
-                    else ""})
+                    else "", "note": kept_note})
         table.append(row)
     return table
 
@@ -163,7 +166,7 @@ def write_pka_csv(path, table, ph):
         w.writerow(["residue", "pKa", "model_pKa", "pKa_minus_pH", "pH", "predicted", "applied_name_change", "check"])
         for r in table:
             w.writerow([r["residue"], "%.2f" % r["pka"], "%.2f" % r["model_pka"], "%+.2f" % r["delta"], "%g" % ph,
-                        r["predicted"], r["renamed"],
+                        r["predicted"], r["renamed"] or r.get("note", ""),
                         {"close": "within 1 pH unit", "near": "within 2 pH units"}.get(r["flag"], "")])
 
 

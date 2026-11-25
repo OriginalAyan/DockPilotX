@@ -493,6 +493,22 @@ assert r2.atoms["OXT"].deleted and "neutral" in notes[("A", 2, "C")] and not any
 assert "ChimeraX could not" not in " ".join(logs_h[-3:])
 m, r1, r2, notes = run_fix([cut[1], real[0]], [rows[0], dict(rows[1], pka=9.0)], 7.4)         # real C end with pKa 9 > pH: COOH
 import types as _t
+# a cut N end where ChimeraX places two hydrogens: keep the one nearest a planar amide (H-N-CA 120), named H
+m, r1, r2 = build_model(False, False)
+r1.atoms["N"].coord = [0.0, 0.0, 0.0]; r1.atoms["CA"].coord = [1.46, 0.0, 0.0]
+def addh_two(sess, text):
+    a = FA("H", r1.atoms["N"], "H2"); a.coord = [-0.5, 0.87, 0.0]       # 120 deg from CA
+    b = FA("H", r1.atoms["N"], "H1"); b.coord = [-0.34, 0.94, 0.0]      # about 110 deg
+    r1.atoms["H2"], r1.atoms["H1"] = a, b
+hy.run = addh_two
+n2 = hy.fix_termini(session, m, [{"chain": "A", "kind": "N", "number": 1, "real": False}], rows, 7.4, logs_h.append)
+left = [a for a in r1.atoms["N"].neighbors if hy._is_h(a)]
+assert len(left) == 1 and left[0].name == "H" and abs(left[0].coord[0] + 0.5) < 1e-9, [(a.name, a.coord) for a in left]
+assert "closest to a planar amide" in logs_h[-2], logs_h[-3:]
+# Tyr: PROPKA says deprotonated, AMBER keeps TYR; the table says so instead of showing a bare dash
+from chimerax.vinapilotx import pdb2pqr_tools as _pq
+t = _pq.build_table([{"group": "TYR", "number": 10, "chain": "A", "pka": 10.14, "model_pka": 10.0}], {("A", 10): "TYR"}, {("A", 10): "TYR"}, 10.5)
+assert t[0]["note"].startswith("kept TYR") and t[0]["renamed"] == ""
 added_atoms = []
 _mod = _t.ModuleType("chimerax.atomic.struct_edit")
 def _add_atom(name, el, res, pos, bonded_to=None): a = FA(el, bonded_to, name); added_atoms.append((name, el, tuple(round(float(x), 2) for x in pos))); return a

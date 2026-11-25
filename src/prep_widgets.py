@@ -101,7 +101,7 @@ class PkaTable(QWidget):
             i = self.table.rowCount()
             self.table.insertRow(i)
             vals = [r["residue"], "%.2f" % r["pka"], "%.2f" % r["model_pka"], "%+.2f" % r["delta"], r["predicted"],
-                    r["renamed"] or "-", {"close": "±1", "near": "±2"}.get(r["flag"], "")]
+                    r["renamed"] or r.get("note") or "-", {"close": "±1", "near": "±2"}.get(r["flag"], "")]
             for j, v in enumerate(vals):
                 it = QTableWidgetItem(v)
                 it.setTextAlignment(Qt.AlignmentFlag.AlignCenter if j else Qt.AlignmentFlag.AlignLeft)

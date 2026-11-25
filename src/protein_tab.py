@@ -621,8 +621,9 @@ class ProteinTab(QWidget):
                 notes.append("renamed: " + ", ".join(res["renamed"][:8]) + (" …" if len(res["renamed"]) > 8 else ""))
             self.pka_table.set_rows(res["table"], res["ph"], "pKa values (saved to %s)" % os.path.basename(res["csv_path"]))
             for r in res["table"]:
-                self.log_line("%-16s pKa %6.2f  (model %5.2f)  %+5.2f  %s%s" % (
+                self.log_line("%-16s pKa %6.2f  (model %5.2f)  %+5.2f  %s%s%s" % (
                     r["residue"], r["pka"], r["model_pka"], r["delta"], r["predicted"],
+                    ("  [%s]" % r["note"]) if r.get("note") else "",
                     "   <-- within ±%d of the pH" % (1 if r["flag"] == "close" else 2) if r["flag"] else ""))
             flips = res.get("flips") or []
             if flips:

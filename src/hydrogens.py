@@ -187,6 +187,32 @@ def _coord(atom):
     return [float(x) for x in atom.coord]
 
 
+def _keep_one_amide_h(model, nat, res):
+    """Keep one hydrogen on a cut N-terminal nitrogen: the one whose H-N-CA angle is closest to 120 degrees (planar
+    amide), named H. The others are deleted."""
+    import numpy as np
+    hs = sorted([a for a in nat.neighbors if _is_h(a)], key=lambda a: a.name)
+    best = hs[0]
+    try:
+        ca = res.find_atom("CA")
+        n = np.array(_coord(nat))
+        u = np.array(_coord(ca)) - n
+
+        def err(h):
+            v = np.array(_coord(h)) - n
+            c = float(np.dot(u, v) / np.linalg.norm(u) / np.linalg.norm(v))
+            return abs(np.degrees(np.arccos(max(-1.0, min(1.0, c)))) - 120.0)
+        scored = [(err(h), h.name, h) for h in hs]
+        best = min(scored, key=lambda t: (t[0] if t[0] == t[0] else 1e9, t[1]))[2]
+    except Exception:
+        pass
+    _delete_atoms(model, [h for h in hs if h is not best])
+    try:
+        best.name = "H"
+    except Exception:
+        pass
+
+
 def fix_termini(session, model, ends, rows, ph, log=None):
     """Set the charge state of the chain ends after PDB2PQR (which keeps every end charged).
 
@@ -221,9 +247,9 @@ def fix_termini(session, model, ends, rows, ph, log=None):
                     _delete_atoms(model, hs)
                     kept = add_hydrogens_to_atoms(session, model, [nat])
                     if kept > 1:
-                        extra = sorted([a for a in nat.neighbors if _is_h(a)], key=lambda a: a.name)[1:]
-                        _delete_atoms(model, extra)
-                        say("%s: ChimeraX could not tell it is not a real end; kept a single amide hydrogen." % label)
+                        _keep_one_amide_h(model, nat, res)
+                        say("%s: ChimeraX placed %d hydrogens on this cut end; kept the one closest to a planar "
+                            "amide position and named it H." % (label, kept))
                     notes[key] = "not a real end: neutral amide (ChimeraX)"
                 else:
                     row = by_key.get((e["chain"], e["number"], "N+"))
