@@ -205,6 +205,17 @@ def run_pdb2pqr(env, in_pdb, out_dir, base, ph, log=None, cancelled=None, timeou
     table = build_table(rows, residue_names(heavy), residue_names(out_pdb), ph)
     csv_path = os.path.join(out_dir, base + "_pka.csv")
     write_pka_csv(csv_path, table, ph)
-    renamed = [r["residue"] + ": " + r["renamed"] for r in table if r["renamed"]]
+    # every residue whose name changed, also those PROPKA gives no pKa for (e.g. an N-terminal His)
+    before, after = residue_names(heavy), residue_names(out_pdb)
+    listed = {(r["chain"], r["number"]) for r in table if r["group"] not in ("N+", "C-")}
+    renamed, no_pka = [], []
+    for (chain, num), old in before.items():
+        new = after.get((chain, num))
+        if new and new != old and old not in ("HOH", "WAT"):      # water naming is not a protonation change
+            label = "%s %s%d: %s → %s" % (old, chain, num, old, new)
+            renamed.append(label)
+            if (chain, num) not in listed:
+                no_pka.append(label)
     return {"pdb": out_pdb, "table": table, "renamed": renamed, "log_path": log_path, "csv_path": csv_path,
-            "ph": ph, "log_text": text, "removed_h": removed, "flips": find_flips(heavy, out_pdb)}
+            "ph": ph, "log_text": text, "removed_h": removed, "flips": find_flips(heavy, out_pdb),
+            "no_pka": no_pka}

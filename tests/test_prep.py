@@ -215,3 +215,16 @@ Chem.MolToPDBFile(m, sys.argv[1])
     low = pq.run_pdb2pqr(env, str(pdb), str(tmp_path / "low"), "pep", 3.0)                     # pH changes the states
     assert pq.residue_names(low["pdb"])[("A", 6)] == "HIP" and any(n.startswith("ASP") for n in [x.split(":")[0] for x in low["renamed"]]) is not None
     assert "ASH" in set(pq.residue_names(low["pdb"]).values()) or "GLH" in set(pq.residue_names(low["pdb"]).values())
+
+
+@pytest.mark.skipif(not REAL, reason="set VPX_TEST_PYTHON to a Python that has Meeko + RDKit")
+def test_renames_include_residues_without_pka(tmp_path):
+    """The first His of a chain gets no PROPKA pKa, but its new name (HIP/HID) must still be reported."""
+    env = pe.external_env(REAL)
+    if not pe.probe(env)["info"].get("pdb2pqr"):
+        pytest.skip("pdb2pqr is not installed in VPX_TEST_PYTHON")
+    src = os.path.join(os.path.dirname(__file__), "data", "vpx_test_peptide.pdb")
+    r = pq.run_pdb2pqr(env, src, str(tmp_path / "o"), "p", 3.0)
+    assert "HIS B3: HIS → HIP" in r["renamed"] and r["no_pka"] == ["HIS B3: HIS → HIP"], (r["renamed"], r["no_pka"])
+    assert "HIS A3: HIS → HIP" in r["renamed"] and "ASP A2: ASP → ASH" in r["renamed"]
+    assert r["flips"] == [] or all(f[0].startswith("ASN") for f in r["flips"])

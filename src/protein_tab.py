@@ -625,6 +625,9 @@ class ProteinTab(QWidget):
                     r["residue"], r["pka"], r["model_pka"], r["delta"], r["predicted"],
                     ("  [%s]" % r["note"]) if r.get("note") else "",
                     "   <-- within ±%d of the pH" % (1 if r["flag"] == "close" else 2) if r["flag"] else ""))
+            if res.get("no_pka"):
+                self.log_line("No PROPKA pKa for: %s. PDB2PQR chose these states itself (PROPKA does not report "
+                              "a pKa for a chain-start His)." % ", ".join(res["no_pka"]))
             flips = res.get("flips") or []
             if flips:
                 self.log_line("Flipped by PDB2PQR (hydrogen-bond optimisation): " + ", ".join(
